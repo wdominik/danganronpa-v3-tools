@@ -1,0 +1,16 @@
+[package]
+name = "drv3-compression"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "CRILAYLA and Spike-Chunsoft LZSS codecs used by Danganronpa V3"
+
+[dependencies]
+drv3-binio = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

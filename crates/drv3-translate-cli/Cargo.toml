@@ -1,0 +1,32 @@
+[package]
+name = "drv3-translate-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Command-line front-end for drv3-translate (apply translation JSONs to game CPKs)"
+
+[dependencies]
+drv3-cpk = { workspace = true }
+drv3-translate = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+memmap2 = { workspace = true }
+indexmap = { workspace = true }
+rayon = { workspace = true }
+# PNG decoder for font glyph sidecars. Default features disabled, only
+# the PNG codec enabled — keeps the dep tree tight.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+# Inherits the workspace `unsafe_code = "deny"` setting. The single mmap call
+# site in `main.rs::mmap_file` uses `#[allow(unsafe_code)]` to opt in locally.
+workspace = true

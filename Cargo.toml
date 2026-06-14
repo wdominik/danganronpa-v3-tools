@@ -1,0 +1,67 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/wdominik/danganronpa-v3-tools"
+authors = ["wdominik"]
+
+[workspace.dependencies]
+# Foundation
+thiserror = "2"
+bitflags = "2.6"
+indexmap = "2"
+
+# CLI-only
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+memmap2 = "0.9"
+
+# Parallelism (per-SPC patch dispatch in drv3-translate)
+rayon = "1.10"
+
+# Internal crates (path deps)
+drv3-binio = { path = "crates/drv3-binio", version = "0.1.1" }
+drv3-compression = { path = "crates/drv3-compression", version = "0.1.1" }
+drv3-cpk = { path = "crates/drv3-cpk", version = "0.1.1" }
+drv3-spc = { path = "crates/drv3-spc", version = "0.1.1" }
+drv3-stx = { path = "crates/drv3-stx", version = "0.1.1" }
+drv3-dat = { path = "crates/drv3-dat", version = "0.1.1" }
+drv3-wrd = { path = "crates/drv3-wrd", version = "0.1.1" }
+drv3-srd = { path = "crates/drv3-srd", version = "0.1.1" }
+drv3-spft = { path = "crates/drv3-spft", version = "0.1.1" }
+drv3-translate = { path = "crates/drv3-translate", version = "0.1.1" }
+
+[workspace.lints.rust]
+# `deny` (not `forbid`) so we can `#[allow(unsafe_code)]` at the single mmap
+# call site in `drv3-cli`. Every other crate stays unsafe-free.
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Format-derived type names like `StxTable` / `CpkFile` repeat the crate
+# name on purpose — readability at call sites wins over deduplication.
+module_name_repetitions = "allow"
+# Pedantic wants `#[must_use]` on every pure value-returning function;
+# the codebase has dozens of tiny accessors where that's just noise.
+must_use_candidate = "allow"
+# ~160 numeric casts driven by format specs (u32↔usize for offsets, u64↔u32
+# for sizes). Most are correct by construction; full audit is parked.
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+# (missing_errors_doc / missing_panics_doc are deliberately NOT allowed —
+# every pub Result-returning / panicking fn must document its behaviour.
+# See CONTRIBUTING.md §9.)
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

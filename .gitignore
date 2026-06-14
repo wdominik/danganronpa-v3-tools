@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+Cargo.lock
+.DS_Store
+/gamedata/*.cpk
+/gamedata/extracted/

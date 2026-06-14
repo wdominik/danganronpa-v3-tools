@@ -1,0 +1,15 @@
+[package]
+name = "drv3-binio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Bounded binary I/O primitives shared by drv3-* format crates"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

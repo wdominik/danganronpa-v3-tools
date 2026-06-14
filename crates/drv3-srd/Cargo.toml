@@ -1,0 +1,17 @@
+[package]
+name = "drv3-srd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Danganronpa V3 SRD block container reader/writer"
+
+[dependencies]
+drv3-binio = { workspace = true }
+thiserror = { workspace = true }
+bitflags = { workspace = true }
+
+[lints]
+workspace = true
