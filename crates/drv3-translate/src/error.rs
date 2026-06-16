@@ -166,12 +166,12 @@ pub enum TranslateError {
         current: u16,
     },
 
-    /// Atlas growth was requested for a `$TXR` whose pixel format is not
-    /// BC4 (`0x16`). The growth path only knows how to extend BC4
-    /// block-row-major buffers.
+    /// A font atlas patch targeted a `$TXR` whose pixel format we can't
+    /// decode. Only the shipped BC4 (`0x16`) and ARGB8888 (`0x01`, our own
+    /// re-emitted output) are supported.
     #[error(
-        "atlas growth in {cpk_path}::{spc_member} unsupported for texture format {format:#04x} \
-         (only BC4 0x16 is supported)"
+        "atlas patch in {cpk_path}::{spc_member} unsupported for texture format {format:#04x} \
+         (only BC4 0x16 and ARGB8888 0x01 are supported)"
     )]
     AtlasUnsupportedFormat {
         cpk_path: String,

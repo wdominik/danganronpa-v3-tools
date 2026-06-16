@@ -4,6 +4,42 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.1.2] — 2026-06-16
+
+### Changed
+
+- **Patched font atlases are re-emitted as uncompressed ARGB8888.** BC4 block
+  compression represents only ~8 coverage levels per 4×4 block, which bands the
+  soft anti-aliased edges of newly added glyphs (e.g. German `ß`/`ä`/`ö`). The
+  font patch path now decodes the shipped BC4 atlas, blits new glyphs at full
+  8-bit precision, and re-emits the whole atlas uncompressed as ARGB8888 (`$TXR`
+  format `0x01`, coverage replicated into all four channels), so the gradient
+  survives bit-for-bit. The `$TXR` format and display height change, plus the
+  `$RSI` resource size; `$TXR.scanline` stays at the shipped BC4 block-row pitch
+  `width*2` (the engine's upload row stride), and every other `$TXR`/`$RSI` field
+  is preserved verbatim. The `atlas.format` JSON field now also accepts
+  `"ARGB8888"` (the source-format hint) so re-applying a patch is idempotent.
+- **`drv3-cli srd inspect`** now also prints `$TXR` `scanline`/`swizzle`/`palette`
+  and the `$RSI` `resource_info_list` values.
+
+### Fixed
+
+- **BC4 (`BC4_UNORM`) decoder used a non-standard index convention.** `build_ramp`
+  built a linear ramp indexed directly by the 3-bit code, so it mis-decoded the
+  game's shipped atlases — reused glyphs decoded at ~56% coverage (`255 → 143`)
+  with a `1` floor instead of `0`, rendering faded next to full-strength new
+  glyphs. `build_ramp` now follows the standard BC4 (RGTC1-unsigned) palette
+  (code `0 → r0`, `1 → r1`, `2..=7` interpolated), so `decode_bc4` reproduces the
+  shipped atlases exactly.
+
+### Removed
+
+- **BC4 encoder.** `encode_bc4` and the in-place `blit_alpha_into_bc4` glyph blit
+  are removed — the font patch path always re-emits ARGB8888, so nothing encodes
+  BC4 any more. `decode_bc4` (reading the shipped atlases) is unchanged.
+
 ## [0.1.1] — 2026-06-14
 
 ### Changed
@@ -59,5 +95,7 @@ First public release.
 - **`drv3-cli roundtrip`** sanity-check subcommand: parse a file,
   re-emit it, exit non-zero if the bytes diverge.
 
+[Unreleased]: https://github.com/wdominik/danganronpa-v3-tools/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.2
 [0.1.1]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.1
 [0.1.0]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.0

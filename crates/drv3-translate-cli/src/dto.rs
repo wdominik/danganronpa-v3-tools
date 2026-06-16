@@ -82,8 +82,10 @@ pub(crate) struct FontFileGroupJson {
 pub(crate) struct AtlasJson {
     pub width: u16,
     pub height: u16,
-    /// Pixel format string from the producer. Only `"BC4"` is supported;
-    /// any other value is rejected at conversion time.
+    /// Pixel format of the *existing* atlas being patched: `"BC4"` (the
+    /// shipped format) or `"ARGB8888"` (an already-patched atlas). Other
+    /// values are rejected at conversion time. Patched atlases are always
+    /// re-emitted uncompressed as ARGB8888 regardless of this value.
     pub format: String,
 }
 
@@ -232,14 +234,18 @@ fn convert_stx_group(
 }
 
 fn convert_font_group(fg: FontFileGroupJson, base: &Path, set: &mut TranslationSet) -> Result<()> {
-    // Atlas geometry: only BC4 is supported (the engine grows BC4
-    // block-row-major buffers). Reject other formats up front with a
-    // clear message rather than letting the engine fail later.
+    // Atlas geometry. `format` names the existing atlas we read from — the
+    // shipped BC4 or, when re-applying, ARGB8888. Patched atlases are always
+    // re-emitted uncompressed (ARGB8888) so the anti-aliased edges survive.
+    // Reject other source formats up front with a clear message.
     let atlas = match fg.atlas {
         Some(a) => {
-            if !a.format.eq_ignore_ascii_case("BC4") {
+            let supported =
+                a.format.eq_ignore_ascii_case("BC4") || a.format.eq_ignore_ascii_case("ARGB8888");
+            if !supported {
                 return Err(anyhow!(
-                    "unsupported atlas format {:?} in font group {}::{}::{} (only BC4 is supported)",
+                    "unsupported atlas format {:?} in font group {}::{}::{} \
+                     (only BC4 and ARGB8888 are supported)",
                     a.format,
                     fg.cpk,
                     fg.cpk_path,

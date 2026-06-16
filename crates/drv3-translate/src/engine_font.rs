@@ -1,4 +1,4 @@
-//! Font-group patching: SPFT metadata + BC4 atlas pixel writes.
+//! Font-group patching: SPFT metadata + atlas pixel writes.
 //!
 //! # Font container layout (DR V3)
 //!
@@ -8,11 +8,11 @@
 //!   file (`$CFH` magic at offset 0). The SPFT (glyph metadata) sits at
 //!   the start of `$RSI.resource_data` inside the top-level `$TXR`
 //!   block's children.
-//! - `<name>.srdv` — the BC4 atlas pixel sidecar (format `0x16`, swizzle
-//!   `0x01`, atlas width 4096 for `v3_font00` and 2048 for the other 24
-//!   fonts, heights between 100 and 469). The BC4 block layout is
-//!   block-row-major with `scanline` bytes per block-row, decoded /
-//!   re-encoded through [`drv3_srd::texture`].
+//! - `<name>.srdv` — the atlas pixel sidecar. The game ships it as BC4
+//!   (format `0x16`, swizzle `0x01`, atlas width 4096 for `v3_font00` and
+//!   2048 for the other 24 fonts, heights between 100 and 469), decoded
+//!   through [`drv3_srd::texture`]. When we patch a font we re-emit it as
+//!   uncompressed ARGB8888 (format `0x01`) — see step 5 below.
 //!
 //! # Pipeline (per font group)
 //!
@@ -21,17 +21,17 @@
 //!    `SpFt` magic.
 //! 3. Parse the SPFT, apply metadata edits (`position`, `size`,
 //!    `kerning`), add glyphs for new codepoints.
-//! 4. If the group requests a taller `atlas` than the game ships: grow
-//!    the BC4 atlas in place — extend the `$TXR` height, re-allocate the
-//!    `.srdv` buffer (old block-rows copied verbatim, new rows zeroed),
-//!    and bump the `$RSI` `ResourceInfo` blob size. Width must stay
-//!    constant, so `scanline` is unchanged and old rows map 1:1.
-//! 5. If any glyph patch carries pixel data: locate the parallel
-//!    `<name>.srdv` SPC member, validate each glyph against the (possibly
-//!    grown) atlas extent, and call
-//!    [`drv3_srd::texture::blit_alpha_into_bc4`] once per glyph — only the
-//!    affected BC4 blocks get re-encoded, so untouched atlas regions stay
-//!    byte-exact.
+//! 4. If the group grows the `atlas` and/or carries glyph pixels: decode
+//!    the shipped atlas (BC4, or ARGB8888 on re-apply) to a full-resolution
+//!    alpha8 coverage buffer, lift it into the (possibly taller) extent with
+//!    new rows zeroed, and copy each glyph's coverage in at full 8-bit
+//!    precision (no BC4 re-encoding — that would band the anti-aliased
+//!    edges). Original glyphs come straight from the decode, untouched.
+//! 5. Re-emit the whole atlas as uncompressed ARGB8888 into the `<name>.srdv`
+//!    SPC member, and update the `$TXR` format (→ `0x01`) and display height,
+//!    plus the `$RSI` `ResourceInfo` blob size. `$TXR.scanline` is left at the
+//!    shipped BC4 block-row pitch `width*2` (the engine reads it as the upload
+//!    row stride). Every other container field is preserved verbatim.
 //! 6. Re-serialize SPFT → put back into `rsi.resource_data` →
 //!    re-serialize SRD → write back to the `.stx` SPC entry.
 
@@ -39,16 +39,24 @@ use std::collections::HashMap;
 
 use drv3_spc::Spc;
 use drv3_spft::{Glyph, SpFt};
-use drv3_srd::texture::blit_alpha_into_bc4;
+use drv3_srd::texture::{blit_alpha8, decode_argb8888_mono, decode_bc4, encode_argb8888_mono};
 use drv3_srd::{Block, ResourceLocationFlags, RsiData, Srd, TxrData};
 
 use crate::error::TranslateError;
 use crate::model::{FontFileGroup, FontGlyphPatch};
 use crate::report::PatchReport;
 
-/// BC4 pixel format tag in `$TXR.format`. The atlas-growth path only
-/// supports this format (block-row-major, 4×4 blocks, 8 bytes/block).
+/// BC4 pixel format tag in `$TXR.format` — the format the game ships font
+/// atlases in. We decode it but never re-encode it; patched atlases are
+/// re-emitted as [`TXR_FORMAT_ARGB8888`].
 const TXR_FORMAT_BC4: u8 = 0x16;
+
+/// Uncompressed 32-bit `ARGB8888` tag in `$TXR.format`. Patched font atlases
+/// are re-emitted in this format so the anti-aliased coverage gradient is
+/// stored at full 8-bit precision — BC4 block compression bands the soft
+/// edges, ARGB8888 keeps them bit-for-bit. Mono replication (coverage → all
+/// four channels) makes channel-order interpretation irrelevant.
+const TXR_FORMAT_ARGB8888: u8 = 0x01;
 
 const SPFT_MAGIC: &[u8; 4] = b"SpFt";
 
@@ -128,13 +136,9 @@ fn patch_atlas(
     // bad width/format is reported up front.
     let (atlas_w, atlas_h) = match &group.atlas {
         Some(requested) => {
-            if fmt != TXR_FORMAT_BC4 {
-                return Err(TranslateError::AtlasUnsupportedFormat {
-                    cpk_path: cpk_path.to_string(),
-                    spc_member: spc_member.to_string(),
-                    format: fmt,
-                });
-            }
+            // Format is validated in `decode_atlas_to_alpha8` below (it accepts
+            // the shipped BC4 and a re-applied ARGB8888); here we only police
+            // the geometry the producer asked for.
             if requested.width != cur_w {
                 return Err(TranslateError::AtlasWidthChange {
                     cpk_path: cpk_path.to_string(),
@@ -173,36 +177,43 @@ fn patch_atlas(
         }
     })?;
 
-    if grew {
-        grow_atlas(
-            srd,
-            rsi_path,
-            &mut spc.entries[sidecar_idx].data,
-            cur_w,
-            cur_h,
-            atlas_h,
-            cpk_path,
-            spc_member,
-        )?;
-        report.font_atlas_grows += 1;
-    }
-
     // Validate every glyph's alpha-buffer geometry (against the possibly
-    // grown extent) before mutating any bytes — fail-fast keeps the SPC
-    // in a consistent state if one entry in a batch is malformed.
+    // grown extent) before touching any bytes — fail-fast keeps the SPC in a
+    // consistent state if one entry in a batch is malformed.
     for patch in &group.glyphs {
         validate_glyph_patch(patch, cpk_path, spc_member, atlas_w, atlas_h)?;
     }
 
-    let sidecar = &mut spc.entries[sidecar_idx].data;
+    // Decode the existing atlas to a full-resolution alpha8 coverage buffer.
+    // We never re-encode BC4 (it would band the anti-aliased edges); instead
+    // we rebuild the whole atlas and re-emit it uncompressed below.
+    let mut pixels = decode_atlas_to_alpha8(
+        &spc.entries[sidecar_idx].data,
+        cur_w,
+        cur_h,
+        fmt,
+        cpk_path,
+        spc_member,
+    )?;
+
+    // Grow: lift the decoded rows into a taller buffer (width is fixed, so
+    // rows map 1:1), zero-filling the appended rows (transparent).
+    if grew {
+        let mut grown = vec![0u8; usize::from(atlas_w) * usize::from(atlas_h)];
+        grown[..pixels.len()].copy_from_slice(&pixels);
+        pixels = grown;
+        report.font_atlas_grows += 1;
+    }
+
+    // Blit each glyph's coverage in — a plain overwrite at full 8-bit precision.
     for patch in &group.glyphs {
         let Some(alpha) = &patch.glyph_alpha8 else {
             continue;
         };
         let (w, h) = patch.size.expect("size validated");
         let pos = patch.position.unwrap_or((0, 0));
-        blit_alpha_into_bc4(
-            sidecar,
+        blit_alpha8(
+            &mut pixels,
             usize::from(atlas_w),
             usize::from(atlas_h),
             usize::from(pos.0),
@@ -213,6 +224,30 @@ fn patch_atlas(
         );
         report.font_atlas_writes += 1;
     }
+
+    // Re-emit the whole atlas as uncompressed ARGB8888: every coverage value
+    // is preserved exactly, so patched glyph edges stay smooth.
+    let argb = encode_argb8888_mono(&pixels);
+    let new_len = argb.len();
+
+    // $RSI: record the new .srdv blob size. Fallible — do every fallible step
+    // before mutating the sidecar bytes or $TXR so a failure leaves the SPC
+    // untouched.
+    let rsi = rsi_data_mut(&mut srd.blocks, rsi_path);
+    update_srdv_resource_size(rsi, new_len, cpk_path, spc_member)?;
+
+    // Commit: swap in the new pixel buffer and switch $TXR to ARGB8888 with the
+    // new height. `$TXR.scanline` is left unchanged: the engine reads it as the
+    // texture's upload row stride and expects the shipped BC4 block-row pitch
+    // `(width/4)*8 == width*2`, not the 32-bpp `width*4`. Atlas growth only
+    // changes height, so the width-derived pitch stays valid. All other
+    // $TXR/$RSI fields stay verbatim.
+    spc.entries[sidecar_idx].data = argb;
+    if let Some(txr) = txr_data_mut(&mut srd.blocks) {
+        txr.format = TXR_FORMAT_ARGB8888;
+        txr.display_height = atlas_h;
+    }
+
     Ok(())
 }
 
@@ -223,57 +258,49 @@ fn bc4_byte_count(width: u16, height: u16) -> usize {
     scanline * usize::from(height).div_ceil(4)
 }
 
-/// Grow a font's BC4 atlas in height. Width (and therefore `scanline`)
-/// stays constant, so the existing block-rows map 1:1 to the head of the
-/// enlarged buffer and only the appended rows need zeroing. Updates the
-/// `.srdv` buffer, the `$TXR` display height, and the `$RSI` `ResourceInfo`
-/// blob size in one coordinated step.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "coordinated single-purpose grow: sidecar buffer + old/new geometry + diagnostics"
-)]
-fn grow_atlas(
-    srd: &mut Srd,
-    rsi_path: &RsiPath,
-    sidecar: &mut Vec<u8>,
-    cur_w: u16,
-    cur_h: u16,
-    new_h: u16,
+/// Decode the shipped atlas sidecar into a full-resolution single-channel
+/// alpha8 coverage buffer (`width * height` bytes, row-major), dispatching on
+/// the `$TXR` format. BC4 (the shipped format) and ARGB8888 (a previously
+/// patched atlas — keeps re-apply idempotent) are supported; anything else is
+/// rejected. The sidecar length is validated against the format + geometry.
+fn decode_atlas_to_alpha8(
+    sidecar: &[u8],
+    width: u16,
+    height: u16,
+    fmt: u8,
     cpk_path: &str,
     spc_member: &str,
-) -> Result<(), TranslateError> {
-    let old_len = bc4_byte_count(cur_w, cur_h);
-    let new_len = bc4_byte_count(cur_w, new_h);
-
-    // The sidecar must currently match the shipped geometry exactly;
-    // otherwise our 1:1 row mapping (and the size we write into the
-    // `ResourceInfo`) would be wrong.
-    if sidecar.len() != old_len {
-        return Err(TranslateError::AtlasGeometry {
+) -> Result<Vec<u8>, TranslateError> {
+    let (wz, hz) = (usize::from(width), usize::from(height));
+    let check = |need: usize| -> Result<(), TranslateError> {
+        if sidecar.len() == need {
+            Ok(())
+        } else {
+            Err(TranslateError::AtlasGeometry {
+                cpk_path: cpk_path.to_string(),
+                spc_member: spc_member.to_string(),
+                detail: format!(
+                    ".srdv is {} bytes but $TXR {width}×{height} format {fmt:#04x} implies {need}",
+                    sidecar.len()
+                ),
+            })
+        }
+    };
+    match fmt {
+        TXR_FORMAT_BC4 => {
+            check(bc4_byte_count(width, height))?;
+            Ok(decode_bc4(sidecar, wz, hz))
+        }
+        TXR_FORMAT_ARGB8888 => {
+            check(wz * hz * 4)?;
+            Ok(decode_argb8888_mono(sidecar, wz, hz))
+        }
+        _ => Err(TranslateError::AtlasUnsupportedFormat {
             cpk_path: cpk_path.to_string(),
             spc_member: spc_member.to_string(),
-            detail: format!(
-                ".srdv is {} bytes but $TXR {cur_w}×{cur_h} implies {old_len}",
-                sidecar.len()
-            ),
-        });
+            format: fmt,
+        }),
     }
-
-    // $RSI `ResourceInfo`: bump the .srdv blob's recorded size (Value[1]).
-    // Done first because it's the only fallible step that can't be
-    // pre-validated above — fail before touching the buffer or $TXR.
-    let rsi = rsi_data_mut(&mut srd.blocks, rsi_path);
-    update_srdv_resource_size(rsi, new_len, cpk_path, spc_member)?;
-
-    // Extend the BC4 buffer; new block-rows decode to 0 (transparent).
-    sidecar.resize(new_len, 0);
-
-    // $TXR height. scanline is unchanged because width is constant.
-    if let Some(txr) = txr_data_mut(&mut srd.blocks) {
-        txr.display_height = new_h;
-    }
-
-    Ok(())
 }
 
 /// Set the byte size (`Value[1]`) of the `$RSI` `ResourceInfo` entry that
@@ -499,8 +526,19 @@ mod tests {
     use super::*;
     use drv3_spc::{COMPRESSION_STORED, SpcEntry};
     use drv3_spft::{Glyph, SpFt};
-    use drv3_srd::texture::{decode_bc4, encode_bc4};
+    use drv3_srd::texture::{decode_argb8888_mono, encode_argb8888_mono};
     use drv3_srd::{Block, RsiData, Srd, TxrData};
+
+    /// A `width × height` BC4 atlas filled with a single coverage `value`:
+    /// every 4×4 block is `[value, value, 0, 0, 0, 0, 0, 0]` (`r0 == r1`,
+    /// all indices 0), which `decode_bc4` reads back as a uniform `value`.
+    /// Stands in for a shipped source atlas in the patch tests.
+    fn uniform_bc4(value: u8, width: usize, height: usize) -> Vec<u8> {
+        let blocks = width.div_ceil(4) * height.div_ceil(4);
+        std::iter::repeat_n([value, value, 0, 0, 0, 0, 0, 0], blocks)
+            .flatten()
+            .collect()
+    }
 
     fn build_spft_bytes() -> Vec<u8> {
         let spft = SpFt {
@@ -593,7 +631,7 @@ mod tests {
     #[test]
     fn metadata_only_patch_changes_existing_glyph_and_reports_change() {
         let srd_bytes = build_srd_with_spft(build_spft_bytes());
-        let srdv = encode_bc4(&vec![0u8; 32 * 16], 32, 16);
+        let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
         let group = FontFileGroup {
             font_name: None,
@@ -628,10 +666,12 @@ mod tests {
     }
 
     #[test]
-    fn atlas_blit_writes_alpha_at_position_and_increments_counters() {
-        let srd_bytes = build_srd_with_spft(build_spft_bytes());
-        // Atlas is 32×16; encode all-zeros initially.
-        let srdv = encode_bc4(&vec![0u8; 32 * 16], 32, 16);
+    fn atlas_blit_writes_alpha_at_position_and_emits_argb8888() {
+        // Atlas is 32×16 BC4; a glyph-only patch re-emits it as ARGB8888, so
+        // the `.srdv` size changes and the $RSI SRDV entry must be present.
+        let old_len = bc4_byte_count(32, 16) as u32;
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
+        let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
 
         // Blit a 4×4 solid-255 glyph at (12, 4) — codepoint 0xE4 (ä).
@@ -651,22 +691,30 @@ mod tests {
         assert_eq!(report.font_glyphs_added, 1);
         assert_eq!(report.font_atlas_writes, 1);
 
-        // Decode the sidecar and verify the pixels are where we put them.
-        let decoded = decode_bc4(&spc.entries[1].data, 32, 16);
+        // Sidecar is now uncompressed ARGB8888: 32×16×4 bytes.
+        assert_eq!(spc.entries[1].data.len(), 32 * 16 * 4);
+        let decoded = decode_argb8888_mono(&spc.entries[1].data, 32, 16);
         for y in 4..8 {
             for x in 12..16 {
                 assert_eq!(decoded[y * 32 + x], 255, "miss at ({x}, {y})");
             }
         }
-        // Spot-check that an unrelated region is still 0.
         assert_eq!(decoded[0], 0);
         assert_eq!(decoded[31], 0);
+
+        // $TXR switched to ARGB8888; scanline left at the shipped BC4 pitch w*2.
+        let (txr, rsi) = parse_txr_and_rsi(&spc.entries[0].data);
+        assert_eq!(txr.format, 0x01);
+        assert_eq!(txr.scanline, (32 / 4) * 8); // preserved BC4 pitch = width * 2
+        assert_eq!(txr.display_width, 32);
+        assert_eq!(txr.display_height, 16);
+        assert_eq!(rsi.resource_info_list[0][1], 32 * 16 * 4);
     }
 
     #[test]
     fn atlas_overflow_is_caught() {
         let srd_bytes = build_srd_with_spft(build_spft_bytes());
-        let srdv = encode_bc4(&vec![0u8; 32 * 16], 32, 16);
+        let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
 
         let group = FontFileGroup {
@@ -689,7 +737,7 @@ mod tests {
     #[test]
     fn alpha_size_mismatch_is_caught() {
         let srd_bytes = build_srd_with_spft(build_spft_bytes());
-        let srdv = encode_bc4(&vec![0u8; 32 * 16], 32, 16);
+        let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
 
         let group = FontFileGroup {
@@ -820,7 +868,7 @@ mod tests {
         let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
         // Fill the original atlas with a recognizable value so we can
         // confirm the old block-rows survive the resize.
-        let srdv = encode_bc4(&vec![7u8; 32 * 16], 32, 16);
+        let srdv = uniform_bc4(7, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
 
         // New glyph in a row only the grown atlas has (y = 20).
@@ -845,27 +893,31 @@ mod tests {
         assert_eq!(report.font_atlas_writes, 1);
         assert_eq!(report.font_glyphs_added, 1);
 
-        // .srdv re-allocated to the grown byte count.
-        assert_eq!(spc.entries[1].data.len(), 512);
+        // .srdv re-allocated to the grown ARGB8888 byte count.
+        assert_eq!(spc.entries[1].data.len(), 32 * 32 * 4);
 
-        let decoded = decode_bc4(&spc.entries[1].data, 32, 32);
+        let decoded = decode_argb8888_mono(&spc.entries[1].data, 32, 32);
         // New glyph landed in the grown region.
         for y in 20..24 {
             for x in 12..16 {
                 assert_eq!(decoded[y * 32 + x], 255, "miss at ({x}, {y})");
             }
         }
-        // Original block-rows survived 1:1 (value 7 from the fill).
+        // Original rows survived 1:1 (value 7 from the fill).
         assert_eq!(decoded[0], 7);
         assert_eq!(decoded[15 * 32 + 31], 7);
         // Appended rows that no glyph touched are zero.
         assert_eq!(decoded[28 * 32], 0);
 
-        // $TXR height grew, width unchanged; $RSI blob size bumped.
+        // $TXR switched to ARGB8888, height grew, width unchanged; scanline is
+        // left at the shipped BC4 pitch w*2 (width-derived, unaffected by the
+        // height growth); $RSI blob size bumped.
         let (txr, rsi) = parse_txr_and_rsi(&spc.entries[0].data);
+        assert_eq!(txr.format, 0x01);
+        assert_eq!(txr.scanline, (32 / 4) * 8); // preserved BC4 pitch = width * 2
         assert_eq!(txr.display_height, 32);
         assert_eq!(txr.display_width, 32);
-        assert_eq!(rsi.resource_info_list[0][1], 512);
+        assert_eq!(rsi.resource_info_list[0][1], 32 * 32 * 4);
         // Opaque trailing value preserved.
         assert_eq!(rsi.resource_info_list[0][2], 0x80);
     }
@@ -874,7 +926,7 @@ mod tests {
     fn atlas_request_matching_shipped_dims_is_noop() {
         let old_len = bc4_byte_count(32, 16) as u32;
         let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
-        let srdv = encode_bc4(&vec![0u8; 32 * 16], 32, 16);
+        let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
         // Atlas restates current dims, no pixel glyphs → no growth, no writes.
         let group = FontFileGroup {
@@ -895,7 +947,7 @@ mod tests {
     fn atlas_growth_rejects_width_change() {
         let old_len = bc4_byte_count(32, 16) as u32;
         let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
-        let srdv = encode_bc4(&vec![0u8; 32 * 16], 32, 16);
+        let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
         let group = FontFileGroup {
             font_name: None,
@@ -915,7 +967,7 @@ mod tests {
     fn atlas_growth_rejects_shrink() {
         let old_len = bc4_byte_count(32, 16) as u32;
         let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
-        let srdv = encode_bc4(&vec![0u8; 32 * 16], 32, 16);
+        let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
         let group = FontFileGroup {
             font_name: None,
@@ -932,11 +984,11 @@ mod tests {
     }
 
     #[test]
-    fn atlas_growth_rejects_non_bc4() {
+    fn atlas_rejects_unsupported_format() {
         let old_len = bc4_byte_count(32, 16) as u32;
-        // format 0x01 is not BC4.
-        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x01);
-        let srdv = encode_bc4(&vec![0u8; 32 * 16], 32, 16);
+        // 0x11 (DXT5) is neither the shipped BC4 nor our ARGB8888 output.
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x11);
+        let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
         let group = FontFileGroup {
             font_name: None,
@@ -953,10 +1005,48 @@ mod tests {
     }
 
     #[test]
+    fn atlas_reapply_to_argb8888_is_accepted_and_lossless() {
+        // Re-applying to an already-patched (ARGB8888) atlas must work, and a
+        // smooth gradient glyph must survive bit-for-bit.
+        let argb_len = 32 * 16 * 4;
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, argb_len as u32, 0x01);
+        let srdv = encode_argb8888_mono(&vec![0u8; 32 * 16]);
+        let mut spc = make_spc_with_font(srd_bytes, srdv);
+
+        let gradient: Vec<u8> = (0..16).map(|i| (i * 17) as u8).collect();
+        let group = FontFileGroup {
+            font_name: None,
+            atlas: None,
+            glyphs: vec![FontGlyphPatch {
+                codepoint: 0xF6,
+                glyph_alpha8: Some(gradient.clone()),
+                position: Some((0, 0)),
+                size: Some((4, 4)),
+                kerning: Some((0, 0, 0)),
+            }],
+        };
+        let mut report = PatchReport::default();
+        patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
+
+        let decoded = decode_argb8888_mono(&spc.entries[1].data, 32, 16);
+        for row in 0..4 {
+            for col in 0..4 {
+                assert_eq!(
+                    decoded[row * 32 + col],
+                    gradient[row * 4 + col],
+                    "gradient pixel ({col}, {row}) not preserved"
+                );
+            }
+        }
+        let (txr, _) = parse_txr_and_rsi(&spc.entries[0].data);
+        assert_eq!(txr.format, 0x01);
+    }
+
+    #[test]
     fn atlas_growth_without_srdv_resource_info_errors() {
         // build_srd_with_spft ships an empty resource_info_list.
         let srd_bytes = build_srd_with_spft(build_spft_bytes());
-        let srdv = encode_bc4(&vec![0u8; 32 * 16], 32, 16);
+        let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
         let group = FontFileGroup {
             font_name: None,

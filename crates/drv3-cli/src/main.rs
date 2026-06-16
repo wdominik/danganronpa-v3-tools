@@ -421,8 +421,13 @@ fn print_block(block: &drv3_srd::Block, depth: usize) {
         drv3_srd::Block::Ct0 => println!("{indent}$CT0"),
         drv3_srd::Block::Txr { txr, children } => {
             println!(
-                "{indent}$TXR  {}x{} format={:#x}",
-                txr.display_width, txr.display_height, txr.format
+                "{indent}$TXR  {}x{} format={:#04x} scanline={} swizzle={} palette={}",
+                txr.display_width,
+                txr.display_height,
+                txr.format,
+                txr.scanline,
+                txr.swizzle,
+                txr.palette,
             );
             for c in children {
                 print_block(c, depth + 1);
@@ -430,10 +435,15 @@ fn print_block(block: &drv3_srd::Block, depth: usize) {
         }
         drv3_srd::Block::Rsi { rsi, children } => {
             println!(
-                "{indent}$RSI  resource_info_count={} resource_data={} bytes",
+                "{indent}$RSI  resource_info_count={} resource_info_size={} resource_data={} bytes",
                 rsi.resource_info_count,
+                rsi.resource_info_size,
                 rsi.resource_data.len()
             );
+            for (i, entry) in rsi.resource_info_list.iter().enumerate() {
+                let values: Vec<String> = entry.iter().map(|v| format!("{v:#010x}")).collect();
+                println!("{indent}  resource_info[{i}] = [{}]", values.join(", "));
+            }
             for c in children {
                 print_block(c, depth + 1);
             }

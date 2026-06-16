@@ -373,7 +373,7 @@ The `atlas` object:
 |---|---|---|---|
 | `width` | `u16` | yes | Must equal the game's existing `$TXR` width — only height growth is supported. A mismatch is a hard error. |
 | `height` | `u16` | yes | Target atlas height. May exceed the shipped height (grows the atlas); must not be smaller (shrinking is rejected). |
-| `format` | `string` | yes | Pixel format. Only `"BC4"` is accepted; any other value is rejected at load time. |
+| `format` | `string` | yes | Format of the *existing* atlas: `"BC4"` (the shipped format) or `"ARGB8888"` (a previously patched atlas). Other values are rejected at load time. Patched atlases are always re-emitted uncompressed as ARGB8888 regardless of this value. |
 
 #### Atlas growth
 
@@ -383,23 +383,29 @@ alphabet for a Western translation) often needs a **taller** atlas than
 the game ships. Declaring a taller `atlas.height` makes the engine grow
 the atlas before blitting:
 
-- **Height only.** `atlas.width` must equal the shipped width. Because
-  the BC4 row pitch (`scanline`) depends only on width, the existing
-  block-rows map 1:1 into the head of the enlarged buffer — no existing
-  pixels are re-encoded. The appended rows start zeroed (transparent).
-- **Three updates, in lock-step.** The `$TXR` display height, the `.srdv`
-  buffer length, and the `$RSI` `ResourceInfo` blob size (`Value[1]`) are
-  all updated together so the container stays self-consistent.
+- **Height only.** `atlas.width` must equal the shipped width, so the
+  decoded rows map 1:1 into the head of the taller buffer. The appended
+  rows start zeroed (transparent).
+- **Re-emitted uncompressed.** Patched atlases are decoded to
+  full-resolution coverage, the new glyphs are blitted in, and the whole
+  atlas is written back as uncompressed **ARGB8888** — never re-encoded to
+  BC4, whose block compression would band the anti-aliased edges. This
+  happens whenever any glyph pixels are written, growth or not.
+- **Updated in lock-step.** The `$TXR` format (→ ARGB8888) and display height,
+  the `.srdv` buffer, and the `$RSI` `ResourceInfo` blob size (`Value[1]`) all
+  change; every other `$TXR`/`$RSI` field is preserved verbatim. In particular
+  **`$TXR.scanline` stays at the shipped BC4 block-row pitch `width*2`** — the
+  engine reads it as the texture's upload row stride and expects that value.
 - **Additive.** Glyphs not listed in the JSON keep their existing
   metadata *and* pixels. A producer that moves an existing glyph into the
   grown region must list it with an `image_path` so its pixels are
   re-blitted at the new position; stale pixels left at the old position
   are unreferenced and harmless.
 - **Errors.** A different width (`AtlasWidthChange`), a smaller height
-  (`AtlasShrink`), a non-BC4 `$TXR` (`AtlasUnsupportedFormat`), or a
-  font whose `$RSI` has no `.srdv` `ResourceInfo` entry
-  (`AtlasSrdvResourceInfoMissing`) all abort the run before any bytes are
-  rewritten.
+  (`AtlasShrink`), a `$TXR` whose format is neither BC4 nor ARGB8888
+  (`AtlasUnsupportedFormat`), or a font whose `$RSI` has no `.srdv`
+  `ResourceInfo` entry (`AtlasSrdvResourceInfoMissing`) all abort the run
+  before any bytes are rewritten.
 
 Each glyph:
 
@@ -441,7 +447,7 @@ Loaded by [`merge_docs`](../crates/drv3-translate-cli/src/dto.rs):
 - Paths in the `image_path` field are resolved relative to **the JSON file's directory** (not the CWD of `drv3-translate apply`). Each JSON has its own base directory.
 - RGBA images contribute via the alpha channel — the decoder reads the alpha plane straight through.
 - The DR V3 atlas convention is "background = 0, ink opacity = 255", which matches what most font-rasterizer exports already produce.
-- Atlas pixel writes happen in place into the parallel `.srdv` SPC member: only the BC4 blocks that overlap the glyph's footprint are re-encoded; everything outside that footprint stays byte-exact, so untouched glyphs never drift. When the group declares a taller `atlas`, the buffer is first extended (existing block-rows copied verbatim) before glyphs are blitted — see [Atlas growth](#atlas-growth).
+- Writing glyph pixels re-emits the whole atlas in the parallel `.srdv` SPC member as uncompressed **ARGB8888**: the shipped BC4 atlas is decoded to coverage, the new glyphs are copied in at full 8-bit precision, and the result is written back with the coverage replicated into all four channels. This avoids BC4's block quantization, which bands anti-aliased glyph edges. Original glyphs are preserved exactly (decoded straight from the shipped atlas); only the `$TXR` format/height and `$RSI` size change — see [Atlas growth](#atlas-growth).
 
 ### Worked example: STX-only patch
 

@@ -91,141 +91,92 @@ pub fn decode_bc4(bytes: &[u8], width: usize, height: usize) -> Vec<u8> {
     out
 }
 
-/// Encode a single-channel alpha8 buffer as `BC4_UNORM`.
+/// Encode a single-channel alpha8 coverage buffer as uncompressed
+/// `ARGB8888` (`$TXR` format `0x01`), replicating each coverage byte into all
+/// four channels.
 ///
-/// `alpha8` must have exactly `width × height` bytes. Output is laid
-/// out block-row-major (matching the on-disk format) and has length
-/// `ceil(width / 4) × ceil(height / 4) × 8`. Pixels beyond the source
-/// dimensions are zero-padded internally to fill partial edge blocks.
-///
-/// The encoder always picks the `r0 > r1` mode (linear 8-stop ramp) for
-/// non-uniform blocks. Uniform blocks emit `r0 == r1` and all-zero
-/// indices, which still decodes back to the original value.
-///
-/// # Errors
-///
-/// None — function is infallible given correctly-sized input.
+/// Output is row-major, 4 bytes per pixel, length `alpha8.len() * 4`. The
+/// mono replication means the engine reads the same coverage value regardless
+/// of how it interprets channel order, and — unlike BC4 — every 8-bit value
+/// is preserved exactly (no block quantization). This is what keeps patched
+/// glyph edges smooth.
 ///
 /// # Panics
 ///
-/// Panics if `alpha8.len() != width * height`.
+/// Never.
 #[must_use]
-pub fn encode_bc4(alpha8: &[u8], width: usize, height: usize) -> Vec<u8> {
-    assert_eq!(
-        alpha8.len(),
-        width * height,
-        "BC4 encode: alpha8 length {} != width*height {}",
-        alpha8.len(),
-        width * height,
-    );
-    let blocks_x = width.div_ceil(BLOCK_DIM);
-    let blocks_y = height.div_ceil(BLOCK_DIM);
-    let mut out = Vec::with_capacity(blocks_x * blocks_y * BLOCK_BYTES);
-    let mut block_pixels = [0u8; 16];
-    for by in 0..blocks_y {
-        for bx in 0..blocks_x {
-            for j in 0..BLOCK_DIM {
-                for i in 0..BLOCK_DIM {
-                    let x = bx * BLOCK_DIM + i;
-                    let y = by * BLOCK_DIM + j;
-                    block_pixels[j * BLOCK_DIM + i] = if x < width && y < height {
-                        alpha8[y * width + x]
-                    } else {
-                        0
-                    };
-                }
-            }
-            out.extend_from_slice(&encode_block(&block_pixels));
-        }
+pub fn encode_argb8888_mono(alpha8: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(alpha8.len() * 4);
+    for &a in alpha8 {
+        out.extend_from_slice(&[a, a, a, a]);
     }
     out
 }
 
-/// Blit a single-channel alpha8 glyph into a `BC4`-encoded atlas
-/// **in place**, re-encoding only the 4×4 blocks that overlap the
-/// glyph footprint. Blocks outside that footprint keep their original
-/// bytes verbatim — guarantees we don't introduce quantization drift
-/// in regions the patch doesn't touch.
+/// Decode an uncompressed `ARGB8888` atlas back to a single-channel alpha8
+/// coverage buffer, taking one byte per pixel.
 ///
-/// `srdv` is the full atlas byte buffer; its length must equal the `BC4`
-/// byte count for `(atlas_width, atlas_height)`. `dst_x` / `dst_y` are
-/// the atlas pixel coordinates of the glyph's top-left, `(src_w, src_h)`
-/// are the glyph dimensions, and `src` is the glyph's alpha8 pixels
-/// (row-major, length `src_w * src_h`).
-///
-/// # Errors
-///
-/// None — function is infallible if pre-conditions are met.
+/// `bytes` must hold at least `width * height * 4` bytes (row-major, 4 bytes
+/// per pixel). The first byte of each pixel is read as the coverage value;
+/// for atlases written by [`encode_argb8888_mono`] all four channels are
+/// equal, so the channel choice is immaterial. Lets us re-apply a patch to an
+/// already-ARGB8888 atlas.
 ///
 /// # Panics
 ///
-/// - if `srdv.len()` doesn't match the expected `BC4` size for
-///   `(atlas_width, atlas_height)`
-/// - if `dst_x + src_w > atlas_width` or `dst_y + src_h > atlas_height`
+/// Panics if `bytes.len() < width * height * 4`.
+#[must_use]
+pub fn decode_argb8888_mono(bytes: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let count = width * height;
+    assert!(
+        bytes.len() >= count * 4,
+        "ARGB8888 decode: input has {} bytes, need {} for {}×{}",
+        bytes.len(),
+        count * 4,
+        width,
+        height,
+    );
+    (0..count).map(|i| bytes[i * 4]).collect()
+}
+
+/// Copy a single-channel alpha8 glyph into a single-channel alpha8 atlas
+/// buffer **in place**, row by row — a plain overwrite with no quantization
+/// and no blending, so the glyph's coverage lands in the atlas bit-for-bit.
+///
+/// `dst` is the full atlas buffer (`dst_w * dst_h` bytes, row-major).
+/// `(dst_x, dst_y)` is the glyph's top-left in atlas pixels, `(src_w, src_h)`
+/// the glyph size, and `src` its `src_w * src_h` alpha8 pixels.
+///
+/// # Panics
+///
+/// - if `dst.len() != dst_w * dst_h`
+/// - if `dst_x + src_w > dst_w` or `dst_y + src_h > dst_h`
 /// - if `src.len() != src_w * src_h`
 #[expect(
     clippy::too_many_arguments,
-    reason = "8 inherently-positional values (atlas dims, dst pos, src dims, src buf) — splitting \
-              into structs would force callers to construct boilerplate types for a hot blit helper"
+    reason = "8 inherently-positional values (atlas dims, dst pos, src dims, src buf)"
 )]
-pub fn blit_alpha_into_bc4(
-    srdv: &mut [u8],
-    atlas_width: usize,
-    atlas_height: usize,
+pub fn blit_alpha8(
+    dst: &mut [u8],
+    dst_w: usize,
+    dst_h: usize,
     dst_x: usize,
     dst_y: usize,
     src_w: usize,
     src_h: usize,
     src: &[u8],
 ) {
-    let blocks_x = atlas_width.div_ceil(BLOCK_DIM);
-    let blocks_y = atlas_height.div_ceil(BLOCK_DIM);
-    assert_eq!(
-        srdv.len(),
-        blocks_x * blocks_y * BLOCK_BYTES,
-        "atlas size mismatch",
-    );
+    assert_eq!(dst.len(), dst_w * dst_h, "atlas size mismatch");
     assert!(
-        dst_x + src_w <= atlas_width && dst_y + src_h <= atlas_height,
+        dst_x + src_w <= dst_w && dst_y + src_h <= dst_h,
         "glyph footprint exceeds atlas extents",
     );
     assert_eq!(src.len(), src_w * src_h, "src buffer size mismatch");
 
-    if src_w == 0 || src_h == 0 {
-        return;
-    }
-
-    let bx_min = dst_x / BLOCK_DIM;
-    let by_min = dst_y / BLOCK_DIM;
-    let bx_max = (dst_x + src_w - 1) / BLOCK_DIM;
-    let by_max = (dst_y + src_h - 1) / BLOCK_DIM;
-
-    for by in by_min..=by_max {
-        for bx in bx_min..=bx_max {
-            let off = (by * blocks_x + bx) * BLOCK_BYTES;
-            let block_bytes: [u8; 8] = srdv[off..off + BLOCK_BYTES]
-                .try_into()
-                .expect("BLOCK_BYTES slice");
-            let mut pixels = decode_block(block_bytes);
-            for j in 0..BLOCK_DIM {
-                for i in 0..BLOCK_DIM {
-                    let ax = bx * BLOCK_DIM + i;
-                    let ay = by * BLOCK_DIM + j;
-                    // Skip pixels outside both the glyph footprint and
-                    // the atlas extents.
-                    let in_glyph_x = ax >= dst_x && ax < dst_x + src_w;
-                    let in_glyph_y = ay >= dst_y && ay < dst_y + src_h;
-                    if !in_glyph_x || !in_glyph_y {
-                        continue;
-                    }
-                    let sx = ax - dst_x;
-                    let sy = ay - dst_y;
-                    pixels[j * BLOCK_DIM + i] = src[sy * src_w + sx];
-                }
-            }
-            let new_block = encode_block(&pixels);
-            srdv[off..off + BLOCK_BYTES].copy_from_slice(&new_block);
-        }
+    for row in 0..src_h {
+        let d0 = (dst_y + row) * dst_w + dst_x;
+        let s0 = row * src_w;
+        dst[d0..d0 + src_w].copy_from_slice(&src[s0..s0 + src_w]);
     }
 }
 
@@ -244,187 +195,71 @@ fn decode_block(block: [u8; 8]) -> [u8; 16] {
     out
 }
 
-fn encode_block(pixels: &[u8; 16]) -> [u8; 8] {
-    let r_min = *pixels.iter().min().expect("16 pixels");
-    let r_max = *pixels.iter().max().expect("16 pixels");
-
-    if r_min == r_max {
-        // Uniform block: emit r0 == r1, all indices 0. ramp[0] == r_min
-        // so the block decodes back to the original uniform value.
-        let mut block = [0u8; 8];
-        block[0] = r_min;
-        block[1] = r_max;
-        return block;
-    }
-
-    let r0 = r_max;
-    let r1 = r_min;
-    let ramp = build_ramp(r0, r1);
-
-    let mut bits: u64 = 0;
-    for (i, &p) in pixels.iter().enumerate() {
-        let mut best_idx: u64 = 0;
-        let mut best_err = u32::MAX;
-        for (j, &r) in ramp.iter().enumerate() {
-            let err = (i32::from(p) - i32::from(r)).unsigned_abs();
-            if err < best_err {
-                best_err = err;
-                best_idx = j as u64;
-            }
-        }
-        bits |= best_idx << (3 * i);
-    }
-
-    let mut block = [0u8; 8];
-    block[0] = r0;
-    block[1] = r1;
-    block[2..8].copy_from_slice(&bits.to_le_bytes()[..6]);
-    block
-}
-
+/// Build the 8-entry BC4 (`BC4_UNORM` / RGTC1-unsigned) decode palette for a
+/// block with endpoints `r0`/`r1`.
+///
+/// This follows the **standard** index convention the game — and every other
+/// BC4 codec — uses: code `0 → r0`, code `1 → r1`, and codes `2..=7` are
+/// interpolated. With `r0 > r1` all six in-between stops are interpolated; with
+/// `r0 <= r1` only four are, and codes `6`/`7` are the constants `0`/`255`.
+/// Interpolation truncates (matching the shipped atlases byte-for-byte).
 fn build_ramp(r0: u8, r1: u8) -> [u8; 8] {
+    let r0u = u32::from(r0);
+    let r1u = u32::from(r1);
+    let mut r = [0u8; 8];
+    r[0] = r0;
+    r[1] = r1;
     if r0 > r1 {
-        let r0u = u32::from(r0);
-        let r1u = u32::from(r1);
-        std::array::from_fn(|i| {
+        // 8-value block: codes 2..=7 interpolate between the endpoints.
+        for (i, slot) in r.iter_mut().enumerate().skip(2) {
             let iu = i as u32;
-            ((r0u * (7 - iu) + r1u * iu + 3) / 7) as u8
-        })
+            *slot = (((8 - iu) * r0u + (iu - 1) * r1u) / 7) as u8;
+        }
     } else {
-        let r0u = u32::from(r0);
-        let r1u = u32::from(r1);
-        let mut r = [0u8; 8];
-        for (i, slot) in r.iter_mut().take(6).enumerate() {
+        // 6-value block: codes 2..=5 interpolate; codes 6/7 are 0 and 255.
+        for (i, slot) in r.iter_mut().enumerate().take(6).skip(2) {
             let iu = i as u32;
-            *slot = ((r0u * (5 - iu) + r1u * iu + 2) / 5) as u8;
+            *slot = (((6 - iu) * r0u + (iu - 1) * r1u) / 5) as u8;
         }
         r[6] = 0;
         r[7] = 255;
-        r
     }
+    r
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn round_trip_uniform_zero() {
-        let src = vec![0u8; 16];
-        let enc = encode_bc4(&src, 4, 4);
-        let dec = decode_bc4(&enc, 4, 4);
-        assert_eq!(dec, src);
+    /// A uniform-`value` BC4 block: `r0 == r1 == value`, all indices 0, so it
+    /// decodes back to `value` everywhere.
+    fn uniform_block(value: u8) -> [u8; 8] {
+        [value, value, 0, 0, 0, 0, 0, 0]
     }
 
     #[test]
-    fn round_trip_uniform_value() {
-        for v in [1u8, 64, 128, 200, 255] {
-            let src = vec![v; 16];
-            let enc = encode_bc4(&src, 4, 4);
-            let dec = decode_bc4(&enc, 4, 4);
-            assert_eq!(dec, src, "uniform value {v} did not round-trip");
-        }
-    }
-
-    #[test]
-    fn round_trip_two_value_block() {
-        // 4×4 with a hard edge — values 0 and 255 only.
-        let src: Vec<u8> = (0..16).map(|i| if i % 4 < 2 { 0 } else { 255 }).collect();
-        let enc = encode_bc4(&src, 4, 4);
-        let dec = decode_bc4(&enc, 4, 4);
-        // BC4 can represent {0, 255} exactly via the `r0=255, r1=0` ramp
-        // with endpoints at ramp[0] and ramp[7].
-        assert_eq!(dec, src);
-    }
-
-    #[test]
-    fn round_trip_gradient_within_tolerance() {
-        // 0..255 in 16 steps — not exactly representable in 8 quantization
-        // levels, but should round-trip within ±9 of the original.
-        let src: Vec<u8> = (0..16).map(|i| (i * 17) as u8).collect();
-        let enc = encode_bc4(&src, 4, 4);
-        let dec = decode_bc4(&enc, 4, 4);
-        let max_err = src
-            .iter()
-            .zip(&dec)
-            .map(|(a, b)| (i32::from(*a) - i32::from(*b)).abs())
-            .max()
-            .unwrap();
-        assert!(max_err <= 20, "gradient error {max_err} exceeded tolerance");
-    }
-
-    #[test]
-    fn blit_only_touches_affected_blocks_and_preserves_others() {
-        // Build a 16×16 atlas filled with a pattern, encode, then blit
-        // a 4×4 glyph at (4, 4). The two blocks NOT touched should be
-        // byte-identical pre vs post.
-        let mut alpha = vec![0u8; 16 * 16];
-        for y in 0..16 {
-            for x in 0..16 {
-                alpha[y * 16 + x] = ((x + y * 16) as u8).wrapping_mul(3);
-            }
-        }
-        let mut atlas = encode_bc4(&alpha, 16, 16);
-        let orig = atlas.clone();
-        // 4×4 glyph of 255s at (4, 4) — should hit exactly one BC4 block.
-        let glyph = vec![255u8; 16];
-        blit_alpha_into_bc4(&mut atlas, 16, 16, 4, 4, 4, 4, &glyph);
-
-        // Block grid is 4×4; the touched block is (1, 1). Every other
-        // block must be byte-identical.
-        for by in 0..4 {
-            for bx in 0..4 {
-                let off = (by * 4 + bx) * 8;
-                if (bx, by) == (1, 1) {
-                    continue;
-                }
-                assert_eq!(
-                    atlas[off..off + 8],
-                    orig[off..off + 8],
-                    "block ({bx}, {by}) was modified but shouldn't have been",
-                );
-            }
-        }
-        // The touched block should decode to all-255.
-        let decoded = decode_bc4(&atlas, 16, 16);
-        for y in 4..8 {
-            for x in 4..8 {
-                assert_eq!(decoded[y * 16 + x], 255);
+    fn decode_bc4_lays_out_blocks_block_row_major() {
+        // Two uniform blocks side by side → an 8×4 atlas, left half 200,
+        // right half 0.
+        let mut bc4 = Vec::new();
+        bc4.extend_from_slice(&uniform_block(200));
+        bc4.extend_from_slice(&uniform_block(0));
+        let dec = decode_bc4(&bc4, 8, 4);
+        assert_eq!(dec.len(), 8 * 4);
+        for y in 0..4 {
+            for x in 0..8 {
+                let expected = if x < 4 { 200 } else { 0 };
+                assert_eq!(dec[y * 8 + x], expected, "mismatch at ({x}, {y})");
             }
         }
     }
 
     #[test]
-    fn blit_glyph_crossing_block_boundary_updates_each_affected_block() {
-        // 16×16 atlas, blit 6×6 glyph at (3, 3) — spans 4 BC4 blocks.
-        let mut atlas = encode_bc4(&vec![0u8; 16 * 16], 16, 16);
-        let glyph = vec![200u8; 36];
-        blit_alpha_into_bc4(&mut atlas, 16, 16, 3, 3, 6, 6, &glyph);
-        let decoded = decode_bc4(&atlas, 16, 16);
-        // Pixels in the glyph footprint should be 200.
-        for y in 3..9 {
-            for x in 3..9 {
-                assert_eq!(decoded[y * 16 + x], 200, "miss at ({x}, {y})");
-            }
-        }
-        // Pixels outside should be 0.
-        for y in 0..16 {
-            for x in 0..16 {
-                if (3..9).contains(&y) && (3..9).contains(&x) {
-                    continue;
-                }
-                assert_eq!(decoded[y * 16 + x], 0, "edge spilled at ({x}, {y})");
-            }
-        }
-    }
-
-    #[test]
-    fn encode_alignment_handles_non_multiple_of_four() {
-        // 7×5 non-aligned — encoder pads to 8×8 internally.
-        let src = vec![42u8; 7 * 5];
-        let enc = encode_bc4(&src, 7, 5);
-        assert_eq!(enc.len(), 2 * 2 * BLOCK_BYTES);
-        let dec = decode_bc4(&enc, 7, 5);
+    fn decode_bc4_crops_partial_edge_blocks() {
+        // 7×5 atlas pads to 8×8 on disk (2×2 blocks); decode returns 7×5.
+        let bc4: Vec<u8> = std::iter::repeat_n(uniform_block(42), 4).flatten().collect();
+        assert_eq!(bc4.len(), 2 * 2 * BLOCK_BYTES);
+        let dec = decode_bc4(&bc4, 7, 5);
         assert_eq!(dec.len(), 7 * 5);
         assert!(dec.iter().all(|&v| v == 42));
     }
@@ -432,14 +267,60 @@ mod tests {
     #[test]
     fn decode_byte_layout_matches_shipped_block() {
         // The first block of v3_font00.srdv is `01 00 49 92 24 49 92 24`.
-        // With r0=1 > r1=0, the 8-stop ramp is essentially
-        // [1, 1, 1, 1, 0, 0, 0, 0] and the indices spell out a mix of
-        // 1s and 2s — i.e., a quantized "background = 1" tile.
+        // With r0=1 > r1=0 the standard palette is [1, 0, 0, 0, 0, 0, 0, 0]
+        // (code 0 → r0 = 1, every other code → 0), so the tile is a quantized
+        // "background ≈ 1" region: every pixel decodes to 0 or 1.
         let block = [0x01, 0x00, 0x49, 0x92, 0x24, 0x49, 0x92, 0x24];
         let pixels = decode_block(block);
-        // Every pixel should be 0 or 1 given the ramp.
         for p in &pixels {
             assert!(*p == 0 || *p == 1, "unexpected pixel value {p}");
+        }
+    }
+
+    #[test]
+    fn decode_block_uses_standard_bc4_index_convention() {
+        // A real shipped block from v3_font03.srdv (`53 FF 49 92 04 C9 9C C0`):
+        // r0=0x53=83 < r1=0xFF=255, the 6-value mode. Under the standard BC4
+        // convention (code 1 → r1) the solid-glyph codes resolve to 255.
+        let block = [0x53, 0xFF, 0x49, 0x92, 0x04, 0xC9, 0x9C, 0xC0];
+        let pixels = decode_block(block);
+        assert_eq!(
+            pixels,
+            [255, 255, 255, 255, 255, 255, 255, 83, 255, 255, 151, 0, 255, 255, 83, 0],
+        );
+        // The standard palette for these endpoints: code 0 → r0, code 1 → r1.
+        assert_eq!(build_ramp(83, 255), [83, 255, 117, 151, 186, 220, 0, 255]);
+    }
+
+    #[test]
+    fn argb8888_mono_round_trips_every_value_exactly() {
+        // The whole point of the uncompressed path: full 8-bit coverage
+        // survives, including a smooth 0..255 gradient that BC4 would band.
+        let alpha: Vec<u8> = (0..=255u8).collect();
+        let enc = encode_argb8888_mono(&alpha);
+        assert_eq!(enc.len(), alpha.len() * 4);
+        for (i, &a) in alpha.iter().enumerate() {
+            assert_eq!(&enc[i * 4..i * 4 + 4], &[a, a, a, a]);
+        }
+        let dec = decode_argb8888_mono(&enc, 16, 16);
+        assert_eq!(dec, alpha, "ARGB8888 round-trip must be lossless");
+    }
+
+    #[test]
+    fn blit_alpha8_copies_glyph_exactly_and_leaves_rest() {
+        let mut atlas = vec![0u8; 8 * 8];
+        let glyph = vec![10, 20, 30, 40, 50, 60]; // 3×2
+        blit_alpha8(&mut atlas, 8, 8, 4, 5, 3, 2, &glyph);
+        for y in 0..8 {
+            for x in 0..8 {
+                let in_glyph = (4..7).contains(&x) && (5..7).contains(&y);
+                let expected = if in_glyph {
+                    glyph[(y - 5) * 3 + (x - 4)]
+                } else {
+                    0
+                };
+                assert_eq!(atlas[y * 8 + x], expected, "mismatch at ({x}, {y})");
+            }
         }
     }
 }

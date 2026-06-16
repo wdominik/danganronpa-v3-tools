@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -27,16 +27,16 @@ memmap2 = "0.9"
 rayon = "1.10"
 
 # Internal crates (path deps)
-drv3-binio = { path = "crates/drv3-binio", version = "0.1.1" }
-drv3-compression = { path = "crates/drv3-compression", version = "0.1.1" }
-drv3-cpk = { path = "crates/drv3-cpk", version = "0.1.1" }
-drv3-spc = { path = "crates/drv3-spc", version = "0.1.1" }
-drv3-stx = { path = "crates/drv3-stx", version = "0.1.1" }
-drv3-dat = { path = "crates/drv3-dat", version = "0.1.1" }
-drv3-wrd = { path = "crates/drv3-wrd", version = "0.1.1" }
-drv3-srd = { path = "crates/drv3-srd", version = "0.1.1" }
-drv3-spft = { path = "crates/drv3-spft", version = "0.1.1" }
-drv3-translate = { path = "crates/drv3-translate", version = "0.1.1" }
+drv3-binio = { path = "crates/drv3-binio", version = "0.1.2" }
+drv3-compression = { path = "crates/drv3-compression", version = "0.1.2" }
+drv3-cpk = { path = "crates/drv3-cpk", version = "0.1.2" }
+drv3-spc = { path = "crates/drv3-spc", version = "0.1.2" }
+drv3-stx = { path = "crates/drv3-stx", version = "0.1.2" }
+drv3-dat = { path = "crates/drv3-dat", version = "0.1.2" }
+drv3-wrd = { path = "crates/drv3-wrd", version = "0.1.2" }
+drv3-srd = { path = "crates/drv3-srd", version = "0.1.2" }
+drv3-spft = { path = "crates/drv3-spft", version = "0.1.2" }
+drv3-translate = { path = "crates/drv3-translate", version = "0.1.2" }
 
 [workspace.lints.rust]
 # `deny` (not `forbid`) so we can `#[allow(unsafe_code)]` at the single mmap
