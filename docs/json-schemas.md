@@ -16,8 +16,8 @@ Rust types and produce/consume raw bytes. The CLIs own every JSON
 schema that ships here, so the on-disk JSON layouts can evolve without
 churning library APIs.
 
-SRD has **no JSON exchange** — it only supports raw byte extract /
-pack. The CPK manifest's optional sidecar packets (`_etoc.bin`,
+SRD has **no JSON exchange** — `srd inspect` only prints a structural
+block tree to stdout. The CPK manifest's optional sidecar packets (`_etoc.bin`,
 `_itoc.bin`, `_gtoc.bin`) are opaque binary blobs and likewise not
 JSON.
 
@@ -108,7 +108,7 @@ drv3-cli wrd build out.json  output.wrd
   "unknown1": 0,
   "external_string_count": 12,
   "commands": [
-    { "opcode": 76, "args": [0, 0] }
+    { "opcode": 75, "args": [0, 0] }
   ],
   "local_branches": [{ "id": 0, "offset": 16 }],
   "label_offsets": [0],
@@ -119,7 +119,7 @@ drv3-cli wrd build out.json  output.wrd
 ```
 
 Opcode bytes and offsets are plain decimal in the JSON (JSON has no
-hex literal syntax). `opcode: 76` is `0x4C` — the `LOC` opcode in the
+hex literal syntax). `opcode: 75` is `0x4B` — the `LOC` opcode in the
 WRD spec.
 
 The `dialogue` subcommand (`drv3-cli wrd dialogue input.wrd`)
@@ -156,7 +156,7 @@ drv3-cli spft build out.json  output.spft
 `{ left, right, vertical }` signed bytes (`left`/`right` horizontal side
 bearings, `vertical` a vertical offset). The metadata round-trips
 cleanly; pixel writes for new glyphs are driven by the translation
-pipeline's font-group support (`drv3-translate apply`), not by the
+pipeline's font-group support (`drv3-translate-cli apply`), not by the
 standalone `spft build` subcommand.
 
 ---
@@ -210,6 +210,11 @@ Notes:
 - Values are tagged objects so they round-trip through `UtfValue`
   without precision loss: `{"u64": 1}`, `{"string": "foo"}`,
   `{"data_hex": "deadbeef"}`.
+- Each `files[]` entry carries `path`, `id`, and (when non-empty)
+  `user_string`. Any TOC columns beyond the standard set (`DirName` /
+  `FileName` / `FileSize` / `ExtractSize` / `FileOffset` / `ID` /
+  `UserString`) are preserved verbatim under an optional `extra` object
+  mapping column name → tagged `UtfValue`; it is omitted when empty.
 - `etoc_packet` / `itoc_packet` / `gtoc_packet` reference the
   opaque sidecar files (`_etoc.bin` etc.) by filename. Omit (or
   set to `null`) when the source CPK has no such packet.
@@ -225,7 +230,7 @@ Notes:
 extracted entry bodies; `spc pack` reads it back. This preserves the
 archive-level `unknown1` / `unknown2`, per-entry `compression_flag`
 and `unknown_flag`, and the original on-disk entry order — metadata a
-naïve "alphabetical sort + force-stored" packer would lose.
+naive "alphabetical sort + force-stored" packer would lose.
 
 ```json
 {
@@ -259,7 +264,7 @@ Notes:
 
 ## drv3-translate patch schema (`drv3-translate/v1`)
 
-A translation document describes the patches a `drv3-translate apply`
+A translation document describes the patches a `drv3-translate-cli apply`
 run should make to one or more CPKs. The CLI accepts multiple JSONs in
 one invocation (`--json a.json --json b.json …`); they merge into a
 single in-memory translation set before the engine runs.
@@ -444,7 +449,7 @@ Loaded by [`merge_docs`](../crates/drv3-translate-cli/src/dto.rs):
 
 ### Glyph-image sidecar conventions
 
-- Paths in the `image_path` field are resolved relative to **the JSON file's directory** (not the CWD of `drv3-translate apply`). Each JSON has its own base directory.
+- Paths in the `image_path` field are resolved relative to **the JSON file's directory** (not the CWD of `drv3-translate-cli apply`). Each JSON has its own base directory.
 - RGBA images contribute via the alpha channel — the decoder reads the alpha plane straight through.
 - The DR V3 atlas convention is "background = 0, ink opacity = 255", which matches what most font-rasterizer exports already produce.
 - Writing glyph pixels re-emits the whole atlas in the parallel `.srdv` SPC member as uncompressed **ARGB8888**: the shipped BC4 atlas is decoded to coverage, the new glyphs are copied in at full 8-bit precision, and the result is written back with the coverage replicated into all four channels. This avoids BC4's block quantization, which bands anti-aliased glyph edges. Original glyphs are preserved exactly (decoded straight from the shipped atlas); only the `$TXR` format/height and `$RSI` size change — see [Atlas growth](#atlas-growth).
@@ -479,7 +484,7 @@ Loaded by [`merge_docs`](../crates/drv3-translate-cli/src/dto.rs):
 Apply with:
 
 ```sh
-drv3-translate apply \
+drv3-translate-cli apply \
   --json chap0.json \
   --cpk gamedata/partition_data_win_us.cpk \
   --out work/patched \
@@ -520,7 +525,7 @@ is at `work/de.json`, the engine reads
 
 ### Report file (`--report`)
 
-When `drv3-translate apply --report report.json` is given, the run
+When `drv3-translate-cli apply --report report.json` is given, the run
 emits a structured outcome record:
 
 ```json

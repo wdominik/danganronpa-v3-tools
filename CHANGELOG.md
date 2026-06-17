@@ -6,6 +6,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-06-17
+
+Maintenance release — no changes to tool behavior or file formats. Toolchain and
+dependency refresh plus a workspace-wide documentation and comment accuracy pass.
+
+### Changed
+
+- **Minimum supported Rust version is now 1.96** (raised from 1.85); the code adopts
+  idioms it unlocks (let-chains, `Int::is_multiple_of`).
+- **Refreshed dependencies** via `cargo update` — notably `bitflags` 2.13.0,
+  `serde_json` 1.0.150, and `image` 0.25.10 (unblocked by the higher MSRV).
+- **Dropped unused dependencies** — `thiserror` from `drv3-dat`, `drv3-spft`, `drv3-srd`,
+  `drv3-stx`, `drv3-wrd`, and `bitflags` from `drv3-cpk`.
+
+### Fixed
+
+- **Documentation and comment accuracy, workspace-wide.** Audited and corrected
+  `README.md`, `CONTRIBUTING.md`, `docs/json-schemas.md`, `docs/binary-formats.md`, and
+  in-code `//!`/`///` comments against the implementation. Notable corrections: the
+  translation binary is `drv3-translate-cli` (was written as `drv3-translate`); `drv3-cli
+  srd` exposes only `inspect`; the `@UTF` cell-read pseudocode and the SPC/WRD header field
+  offsets now match the code; documented the CPK manifest `files[].extra` field; the `LOC`
+  opcode is `0x4B`; American-English prose throughout.
+
 ## [0.1.2] — 2026-06-16
 
 ### Changed
@@ -88,14 +112,15 @@ First public release.
 - **SpFt font metadata** read and write (`drv3-spft`, `drv3-cli spft dump | build`).
 - **Foundation crates** `drv3-binio` (bounded binary I/O primitives) and
   `drv3-compression` (SPC-LZSS codec, CRILAYLA header recognition).
-- **Translation pipeline** (`drv3-translate`, `drv3-translate apply | validate`):
+- **Translation pipeline** (`drv3-translate`, `drv3-translate-cli apply | validate`):
   JSON exchange format, drift detection (warn / skip / error policies),
   parallel patching across CPKs, font-atlas pixel writing into the
   BC4-encoded `.srdv` sidecars.
 - **`drv3-cli roundtrip`** sanity-check subcommand: parse a file,
   re-emit it, exit non-zero if the bytes diverge.
 
-[Unreleased]: https://github.com/wdominik/danganronpa-v3-tools/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/wdominik/danganronpa-v3-tools/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.3
 [0.1.2]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.2
 [0.1.1]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.1
 [0.1.0]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.0

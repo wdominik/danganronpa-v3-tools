@@ -102,7 +102,9 @@ pub(crate) fn patch_font_member(
     // ---- Atlas side: grow the atlas (if requested) and blit glyphs
     // into the .srdv sidecar SPC member. ----
     if group.atlas.is_some() || group.glyphs.iter().any(|g| g.glyph_alpha8.is_some()) {
-        patch_atlas(spc, &mut srd, &rsi_path, cpk_path, spc_member, group, report)?;
+        patch_atlas(
+            spc, &mut srd, &rsi_path, cpk_path, spc_member, group, report,
+        )?;
     }
 
     // Serialize the SRD wrapper and put it back into the .stx entry.
@@ -398,10 +400,10 @@ fn find_spft_rsi(blocks: &[Block]) -> Option<RsiPath> {
             }
             Block::Txr { children, .. } => {
                 for (j, child) in children.iter().enumerate() {
-                    if let Block::Rsi { rsi, .. } = child {
-                        if rsi.resource_data.starts_with(SPFT_MAGIC) {
-                            return Some(RsiPath::InTxr(i, j));
-                        }
+                    if let Block::Rsi { rsi, .. } = child
+                        && rsi.resource_data.starts_with(SPFT_MAGIC)
+                    {
+                        return Some(RsiPath::InTxr(i, j));
                     }
                 }
             }
@@ -486,23 +488,23 @@ fn apply_glyph_metadata(spft: &mut SpFt, patches: &[FontGlyphPatch], report: &mu
         if let Some(i) = idx.get(&patch.codepoint).copied() {
             let existing = &mut spft.glyphs[i];
             let mut changed = false;
-            if let Some((x, y)) = patch.position {
-                if existing.position != (x, y) {
-                    existing.position = (x, y);
-                    changed = true;
-                }
+            if let Some((x, y)) = patch.position
+                && existing.position != (x, y)
+            {
+                existing.position = (x, y);
+                changed = true;
             }
-            if let Some((w, h)) = patch.size {
-                if existing.size != (w, h) {
-                    existing.size = (w, h);
-                    changed = true;
-                }
+            if let Some((w, h)) = patch.size
+                && existing.size != (w, h)
+            {
+                existing.size = (w, h);
+                changed = true;
             }
-            if let Some((l, r, v)) = patch.kerning {
-                if existing.kerning != (l, r, v) {
-                    existing.kerning = (l, r, v);
-                    changed = true;
-                }
+            if let Some((l, r, v)) = patch.kerning
+                && existing.kerning != (l, r, v)
+            {
+                existing.kerning = (l, r, v);
+                changed = true;
             }
             if changed {
                 report.font_glyphs_changed += 1;
@@ -807,7 +809,13 @@ mod tests {
     /// `ResourceInfo` entry (8 × u32, `resource_info_size = 32`) whose
     /// `Value[1]` records the `.srdv` blob byte size — so atlas growth has
     /// an entry to update. `format` is the `$TXR` pixel format tag.
-    fn build_srd_with_srdv_info(spft_bytes: Vec<u8>, w: u16, h: u16, srdv_len: u32, format: u8) -> Vec<u8> {
+    fn build_srd_with_srdv_info(
+        spft_bytes: Vec<u8>,
+        w: u16,
+        h: u16,
+        srdv_len: u32,
+        format: u8,
+    ) -> Vec<u8> {
         let rsi = RsiData {
             unknown_10: 0,
             unknown_11: 0,

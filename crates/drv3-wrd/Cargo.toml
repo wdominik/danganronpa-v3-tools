@@ -10,7 +10,6 @@ description = "Danganronpa V3 WRD script reader/writer"
 
 [dependencies]
 drv3-binio = { workspace = true }
-thiserror = { workspace = true }
 
 [lints]
 workspace = true

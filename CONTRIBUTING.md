@@ -1,8 +1,10 @@
 # Contributing
 
 Coding conventions and comment style for the `danganronpa-v3-tools` Rust
-workspace. The guidance below is opinionated where Rust itself isn't —
-elsewhere we follow the official [Rust API
+workspace. The guidance below is opinionated where Rust itself isn't. We run a
+stricter-than-default lint set — the full clippy `pedantic` group plus several
+`rustc` lints, with a few documented carve-outs (see §11). Everywhere the
+workspace lints don't override, we follow the official [Rust API
 guidelines](https://rust-lang.github.io/api-guidelines/) and
 [rustfmt](https://github.com/rust-lang/rustfmt) / [clippy](https://github.com/rust-lang/rust-clippy)
 defaults.
@@ -14,7 +16,7 @@ the official recommendation wins — please open a PR that updates this file.
 
 ## 1. Project shape
 
-The repository is a Cargo workspace with eleven crates under `crates/`:
+The repository is a Cargo workspace with twelve crates under `crates/`:
 
 ```
 drv3-binio  ──┬── drv3-cpk
@@ -22,7 +24,8 @@ drv3-binio  ──┬── drv3-cpk
               ├── drv3-stx
               ├── drv3-dat
               ├── drv3-wrd
-              ├── drv3-srd ──── drv3-spft
+              ├── drv3-srd
+              ├── drv3-spft
               ├── drv3-translate ── drv3-translate-cli
               └── drv3-cli ── (depends on every format crate above)
 ```
@@ -54,9 +57,10 @@ and never reference either document directly (see §8).
 
 ## 2. Toolchain & build
 
-- **Rust stable**, pinned in `rust-toolchain.toml`. MSRV is captured by
-  `rust-version` in the workspace `Cargo.toml`; bumps require a workspace-
-  wide compile check.
+- **Rust stable**, pinned in `rust-toolchain.toml`. The MSRV
+  (`rust-version` in the workspace `Cargo.toml`) tracks the latest stable
+  release — currently 1.96 — so the modern idioms in §12 are always
+  available; bumping it requires a workspace-wide compile check.
 - **Edition 2024** across every crate.
 - **`rustfmt` defaults** — no custom `rustfmt.toml`. Run
   `cargo fmt --all` before pushing.
@@ -103,7 +107,7 @@ Standard Rust naming applies:
 | Types, traits, enum variants | `UpperCamelCase` | `Cpk`, `UtfTable`, `StorageFlag::PerRow` |
 | Functions, methods, fields | `snake_case` | `parse`, `to_bytes`, `header_columns` |
 | Constants, statics | `SCREAMING_SNAKE_CASE` | `PACKET_WRAPPER_SIZE`, `DEFAULT_ALIGN` |
-| Type parameters | `T`, `U`, or descriptive `UpperCamelCase` | `T`, `Reader<'a>` |
+| Type parameters | `T`, `U`, or descriptive `UpperCamelCase` | `T`, `R: Read` |
 | Lifetimes | short lowercase, `'a` first | `'a`, `'mmap` |
 
 ### Format-derived names
@@ -143,8 +147,8 @@ are proper nouns in the file format.
 
 ## 6. Imports
 
-Group imports in three blocks separated by a blank line, matching the
-rustfmt default:
+Group imports in three blocks separated by a blank line — `std`, then
+external crates, then `crate`/local:
 
 ```rust
 use std::collections::HashMap;
@@ -162,15 +166,22 @@ use crate::utf::{StorageFlag, UtfTable};
   `Vec<u8>`, not `std::vec::Vec<u8>`.
 - **No glob imports** (`use foo::*;`) outside test modules. In test
   modules, `use super::*;` is the standard convention and is encouraged.
-- Order imports alphabetically within each block (rustfmt does this).
+- Order imports alphabetically within each block — stable rustfmt does this
+  automatically (`reorder_imports`, on by default).
+- The three-block grouping itself is a **manual convention**: rustfmt's
+  default `group_imports = "Preserve"` sorts *within* blocks but never
+  creates or reorders them, so keep the `std` / external / `crate` split by
+  hand.
 
 ---
 
 ## 7. Errors
 
-- **Libraries** use [`thiserror`](https://docs.rs/thiserror) to derive
-  per-crate error enums. Each enum wraps `drv3_binio::BinError` via
-  `#[from]` where the underlying I/O error is the failure cause.
+- **Libraries with failure modes beyond raw I/O** (`drv3-cpk`, `drv3-spc`,
+  `drv3-compression`, `drv3-translate`) use
+  [`thiserror`](https://docs.rs/thiserror) to derive a per-crate error
+  enum. Each enum wraps `drv3_binio::BinError` via `#[from]` where the
+  underlying I/O error is the failure cause.
 
   ```rust
   #[derive(Debug, Error)]
@@ -182,6 +193,11 @@ use crate::utf::{StorageFlag, UtfTable};
       MissingColumn(String, &'static str),
   }
   ```
+
+  The simpler format crates (`drv3-dat`, `drv3-spft`, `drv3-srd`,
+  `drv3-stx`, `drv3-wrd`) introduce no error states of their own — they
+  propagate `drv3_binio::{BinError, BinResult}` directly and don't depend
+  on `thiserror`.
 
 - **Binaries** (`drv3-cli`) use `anyhow::Result` at the handler boundary.
   Library errors propagate naturally via `?`; use `.with_context(|| …)`
@@ -202,12 +218,9 @@ use crate::utf::{StorageFlag, UtfTable};
 
 The central rule: **comments are self-contained**.
 
-- **No external doc references.** Comments must not say "see
-  `docs/binary-formats.md`", "per §3.7", "per the spec", or similar.
-  The `docs/` directory is a living human-readable reference that
-  evolves on its own schedule; section numbers rot, terminology
-  drifts, and a contributor reading the code shouldn't have to
-  context-switch.
+- **No external doc references.** Comments must not say "see the format
+  docs", "per §3.7", "per the spec", or similar — keep every comment
+  self-contained. The rationale lives in §16.
 - **WHY, not WHAT.** Identifiers describe what the code does. Comments
   describe the things a reader can't see:
   - Format quirks (`flag bytes are stored with bits reversed because…`)
@@ -221,8 +234,10 @@ The central rule: **comments are self-contained**.
 - **Style**:
   - `///` for items that appear in the public API or in `cargo doc`.
   - `//` for impl-internal and inline comments.
-  - **No trailing periods** on single-sentence comments — matches the
-    existing codebase.
+  - **`///` doc comments are complete sentences ending in a period**, per
+    std / rustdoc convention. Terse inline `//` notes can stay fragmentary.
+    (Existing comments predate this — match the standard in new and edited
+    code rather than mass-rewriting.)
   - **Imperative present tense** for action descriptions ("Parse the
     header", "Reverse the bit order"). **Descriptive form** for return
     values ("Returns the header layout").
@@ -278,14 +293,20 @@ without forcing a contributor to open the docs.
 
 ## 9. Doc-comments
 
-Every `pub` item gets a `///` doc comment.
+Every `pub` function and type gets a `///` doc comment. The compiler
+enforces a subset of this — `missing_errors_doc` and `missing_panics_doc`
+(via clippy `pedantic`) require `# Errors` / `# Panics` on the relevant
+`pub fn`s. Blanket `missing_docs` is deliberately *not* enabled: the format
+crates expose many `pub` struct fields and enum variants (`unknown_2c`,
+`StorageFlag::PerRow`) whose meaning lives in the crate's on-disk layout
+header (§8), and a per-field `///` would be the noise §8 forbids.
 
 ### Required structure
 
-1. **First line: one-sentence summary**, no period.
+1. **First line: a one-sentence summary** ending in a period.
 2. **Blank line**, then optional explanatory paragraphs.
-3. Sections in this order when present: `# Examples`, `# Errors`,
-   `# Panics`, `# Safety`.
+3. Sections in this order when present: `# Errors`, `# Panics`, `# Safety`,
+   `# Examples`.
 
 ### `# Errors` (required on every `pub fn` returning `Result`)
 
@@ -312,6 +333,18 @@ internal invariants (e.g. an `expect` whose message documents the
 invariant), it doesn't need a `# Panics` section — the panic is a bug, not
 behavior.
 
+### `# Safety` (required on every `unsafe fn`)
+
+Document the contract the caller must uphold. The two existing examples are
+`drv3-cli::mmap_file` and `drv3-translate-cli::mmap_file`, which share the
+same pattern:
+
+```rust
+// SAFETY: file is opened read-only and used only for the duration of this
+// call's caller; no concurrent writer is expected on a game-data CPK.
+let mmap = unsafe { memmap2::Mmap::map(&file) }?;
+```
+
 ### `# Examples` (encouraged for non-trivial public APIs)
 
 Format-crate `parse` / `to_bytes` functions are good candidates. Examples
@@ -327,17 +360,6 @@ should be runnable doctests where possible:
 /// }
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-```
-
-### `# Safety` (required on every `unsafe fn`)
-
-Document the contract the caller must uphold. The single existing example
-is `drv3-cli::mmap_file`:
-
-```rust
-// SAFETY: file is opened read-only and used only for the duration of this
-// call's caller; no concurrent writer is expected on a game-data CPK.
-let mmap = unsafe { memmap2::Mmap::map(&file) }?;
 ```
 
 ### Intra-doc links
@@ -425,7 +447,8 @@ cast_lossless = "allow"
 
 - **`unsafe_code = "deny"`** — every unsafe block requires a per-site
   `#[allow(unsafe_code)]` with a `// SAFETY: …` comment. Workspace-wide
-  there is exactly one such site (the mmap call in `drv3-cli`).
+  there are exactly two such sites (the mmap calls in `drv3-cli` and
+  `drv3-translate-cli`).
 - **`pedantic = warn`** — the full pedantic group is enabled. New
   contributors should expect clippy to flag style issues that the default
   group misses.
@@ -446,11 +469,13 @@ cast_lossless = "allow"
 | `must_use_candidate` | Pedantic wants `#[must_use]` on every pure value-returning function. For dozens of tiny accessors (`UtfValue::ty()`, `has_name()`) the annotation is rote noise. |
 | `cast_possible_truncation`, `cast_sign_loss`, `cast_lossless` | The codebase has ~160 numeric casts driven by format specifications (`u32 ↔ usize` for offsets, `u64 ↔ u32` for sizes). Most are correct by construction, not by accident. A future audit may tighten this; for now the cost outweighs the safety win. |
 
-**New casts** should not lean on the workspace allow. The carve-out
-exists so the existing format-driven casts compile without per-site
-noise; anything *new* gets a per-site `#[expect(clippy::cast_possible_truncation,
-reason = "…")]` (or the appropriate sibling lint) that names the
-invariant making the cast safe. Reviewers can surface hits with:
+**New casts** should not lean on the workspace allow. Because these lints
+are `allow`ed workspace-wide, the compiler won't flag a new unannotated
+cast — so this is a **reviewer-enforced convention, not a hard gate**: any
+*new* cast gets a per-site `#[expect(clippy::cast_possible_truncation,
+reason = "…")]` (or the appropriate sibling lint) that names the invariant
+making the cast safe. Reviewers surface unannotated casts by re-enabling the
+lints:
 
 ```sh
 cargo clippy --workspace --all-targets -- -D warnings \
@@ -471,19 +496,19 @@ outlived their purpose.
 ## 12. Newer Rust idioms to prefer
 
 Edition 2024 and recent stdlib additions provide ergonomic alternatives
-to older patterns. Use the modern form unless there's a reason not to:
+to older patterns. Use the modern form unless there's a reason not to. All
+of these are within the workspace MSRV (§2); when you reach for a
+newer-than-MSRV feature, bump `rust-version` first:
 
 | Modern | Old |
 |---|---|
 | `let Some(x) = option else { return Err(…) }` | `let x = if let Some(x) = option { x } else { … }` |
 | `if let Some(x) = a && let Some(y) = b { … }` (chains) | nested `if let` |
-| `#[expect(lint, reason = "…")]` | `#[allow(lint)]` |
 | `option.is_some_and(\|x\| x > 0)` | `option.map(\|x\| x > 0).unwrap_or(false)` |
 | `option.is_none_or(\|x\| x > 0)` | `option.map(\|x\| x > 0).unwrap_or(true)` |
 | `result.inspect(\|x\| …)` | `result.map(\|x\| { …; x })` |
 | `std::sync::OnceLock`, `LazyLock` | `once_cell::sync::OnceCell` |
 | Range patterns `0..=255` | `matches!(x, 0..=255)` (and `if x >= 0 && x <= 255`) |
-| `#[non_exhaustive]` on growing enums | manual `_ => unreachable!()` |
 | `&str` parameter | `&String` parameter |
 | `impl AsRef<Path>` for paths | `&Path` directly |
 | `&[T]` parameter | `&Vec<T>` parameter |
@@ -498,9 +523,10 @@ message when a panic is genuinely unreachable.
 
 - **Default**: workspace-wide `unsafe_code = "deny"`. No unsafe in
   libraries.
-- **Exception**: a single `#[allow(unsafe_code)]` in
-  `drv3-cli/src/main.rs::mmap_file` for `memmap2::Mmap::map`, with a
-  `// SAFETY: …` comment explaining the contract.
+- **Exception**: two `#[allow(unsafe_code)]` sites, in
+  `drv3-cli/src/main.rs::mmap_file` and
+  `drv3-translate-cli/src/main.rs::mmap_file`, both for `memmap2::Mmap::map`,
+  each with a `// SAFETY: …` comment explaining the contract.
 - **New unsafe** anywhere else requires PR discussion. Document the
   invariant the caller must uphold using a `# Safety` section on `unsafe
   fn`, and a `// SAFETY: …` comment on each `unsafe { … }` block
@@ -512,7 +538,7 @@ message when a panic is genuinely unreachable.
 
 - **`memmap2`** for files ≥ ~64 MB. The CPK list/extract paths in the
   CLI already use it; the kernel pages bytes in on demand instead of
-  forcing a 12 GB heap allocation for the largest shipped archive.
+  forcing a 12 GB heap allocation for the largest single shipped archive.
 - **Preallocate `Vec` capacity** when the final size is known up front
   (`Vec::with_capacity(n)`). The format writers do this for header,
   schema, row-data, string pool, data blob buffers.
@@ -552,7 +578,7 @@ round-trip**: `write(parse(bytes)) == bytes`.
   ```
 
 - **Synthetic round-trip tests** in unit-test modules. These exercise the
-  code path in CI without needing the 23 GB of game archives.
+  code path in CI without needing the full ~23 GB of game archives on disk.
 
 ### Bit-equal vs. semantic
 
@@ -560,7 +586,7 @@ A few formats can only be semantically round-tripped:
 
 - **CPK content blob**: file bodies and the @UTF tables round-trip
   bit-equally; padding bytes between files are not — the original
-  encoder sometimes leaves uninitialised memory there, our writer
+  encoder sometimes leaves uninitialized memory there, our writer
   zero-pads. The game's runtime ignores any byte past a file body's
   declared `FileSize`.
 - **SPC LZSS-compressed entries**: many valid encodings exist for the

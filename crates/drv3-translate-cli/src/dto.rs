@@ -57,7 +57,7 @@ pub(crate) struct EntryJson {
     pub source: String,
     pub target: String,
     // `context` is intentionally accepted-and-ignored: it carries opaque
-    // translator metadata that the patch engine has no use for. Deserialise
+    // translator metadata that the patch engine has no use for. Deserialize
     // it via the catch-all so unknown context shapes don't break parsing.
     #[serde(default)]
     #[expect(dead_code, reason = "translator metadata; ignored by patcher")]
@@ -336,18 +336,18 @@ fn load_glyph_png_as_alpha8(
     let img =
         image::open(path).with_context(|| format!("decoding glyph PNG {}", path.display()))?;
     let (w, h) = (img.width(), img.height());
-    if let Some((dw, dh)) = declared_size {
-        if u32::from(dw) != w || u32::from(dh) != h {
-            return Err(anyhow!(
-                "glyph U+{:04X} PNG {} is {}×{} but size field declares {}×{}",
-                codepoint,
-                path.display(),
-                w,
-                h,
-                dw,
-                dh,
-            ));
-        }
+    if let Some((dw, dh)) = declared_size
+        && (u32::from(dw) != w || u32::from(dh) != h)
+    {
+        return Err(anyhow!(
+            "glyph U+{:04X} PNG {} is {}×{} but size field declares {}×{}",
+            codepoint,
+            path.display(),
+            w,
+            h,
+            dw,
+            dh,
+        ));
     }
     let rgba = img.to_rgba8();
     // Use the alpha channel directly. For typical font glyph exports
@@ -390,7 +390,13 @@ mod tests {
         let FileFormat::Font(fg) = &set.files[0].format else {
             panic!("expected a font group");
         };
-        assert_eq!(fg.atlas, Some(AtlasSpec { width: 2048, height: 200 }));
+        assert_eq!(
+            fg.atlas,
+            Some(AtlasSpec {
+                width: 2048,
+                height: 200
+            })
+        );
         let g = &fg.glyphs[0];
         assert_eq!(g.codepoint, 196);
         assert_eq!(g.position, Some((10, 20)));

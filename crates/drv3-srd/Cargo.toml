@@ -10,7 +10,6 @@ description = "Danganronpa V3 SRD block container reader/writer"
 
 [dependencies]
 drv3-binio = { workspace = true }
-thiserror = { workspace = true }
 bitflags = { workspace = true }
 
 [lints]

@@ -44,7 +44,7 @@ impl Reader<'_> {
     /// buffer, or if the bytes don't form valid UTF-16.
     pub fn read_utf16le_exact(&mut self, byte_len: usize) -> BinResult<String> {
         let start = self.position();
-        if byte_len % 2 != 0 {
+        if !byte_len.is_multiple_of(2) {
             return Err(BinError::malformed(
                 start,
                 format!("UTF-16 LE byte length must be even, got {byte_len}"),

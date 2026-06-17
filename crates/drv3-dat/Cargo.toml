@@ -10,7 +10,6 @@ description = "Danganronpa V3 DAT typed-table reader/writer"
 
 [dependencies]
 drv3-binio = { workspace = true }
-thiserror = { workspace = true }
 
 [lints]
 workspace = true

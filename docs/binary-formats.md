@@ -143,7 +143,7 @@ the source file.** Specifically:
 - The per-table `Unknown` field (4 bytes) in STX.
 - `UnknownFlag` (2 bytes) on each SPC subfile.
 - `unknown1` (4 bytes) in the WRD header.
-- The five reserve bytes of padding at SPC offset `0x30`.
+- The 16-byte (`0x10`) padding region at SPC offset `0x30`.
 - All `UnknownNN` fields in SRD `$TXR` (`Unknown10`, `Unknown1D`) and `$RSI`
   (`Unknown10`, `Unknown11`, `Unknown12`, `Unknown1A`) blocks.
 - `Unknown6` (4 bytes) and `ScaleFlag` (4 bytes) in the SpFt FontBlock header.
@@ -338,12 +338,14 @@ the data blob.
 ```text
 function get(row_index, column_name):
     col = schema[column_name]
-    storage_flag = col.flags >> 4
-    if storage_flag == 0x5:
+    storage = col.flags & 0xF0          # storage selector, per §3.4.1
+    if storage == 0x00:                 # None — no value on disk
+        return null
+    if storage == 0x10:                 # Zero — value is an implicit 0 / empty
         return 0
-    if storage_flag == 0x1:
+    if storage == 0x30 or storage == 0x70:   # Constant / Constant2 — inline value
         return col.constant
-    # storage_flag == 0x3 (per-row)
+    # storage == 0x50 (PerRow) — value lives in the row-data section
     seek(rows_offset + row_index * row_size + col.row_offset)
     raw = read typed value
     if col.type == STRING:
@@ -401,17 +403,18 @@ columns:
 
 ### 3.7 Resolving file offsets
 
-`FileOffset` in a TOC row is **relative**. The absolute file offset depends on
-which TOC the entry came from:
+`FileOffset` in a TOC row is **relative**, and two conventions exist in the wild:
 
-- For rows from the **TOC** packet: absolute = `TocOffset` + `FileOffset` (some
-  CPK versions instead use `ContentOffset` + `FileOffset`; pick the convention
-  that produces non-overlapping reads — `ContentOffset` is the safer default
-  for files where `TocOffset` < `ContentOffset`).
-- For rows from the **ITOC** packet: absolute = `ContentOffset` + `FileOffset`.
+- `absolute = TocOffset + FileOffset` — canonical CRIWARE behavior; what DR V3
+  and every modern CPK uses.
+- `absolute = ContentOffset + FileOffset` — alternate base seen on some archives.
 
-When in doubt, check that the resulting absolute offset is `>= ContentOffset`
-and `< FileSize` (the CPK file size from the header).
+Rather than guess, **sniff both bases and pick the one that resolves cleanly**. A
+candidate base is valid only if *every* row's span `[abs, abs + FileSize)` lies
+inside `[ContentOffset, file_length]` — file bodies always live in the content
+blob, never inside the packet headers. As a sharper tie-breaker, the first row's
+`abs` should equal `ContentOffset` exactly. Among bases that satisfy this, prefer
+`TocOffset`. (ITOC rows, when used, are always `ContentOffset`-relative.)
 
 ### 3.8 Compressed file entries (CRILAYLA)
 
@@ -486,8 +489,8 @@ for each row in toc_utf:
     extract_size = row["ExtractSize"]
     rel_offset   = row["FileOffset"]
 
-    # Resolve absolute offset — try both conventions, pick the one in range
-    abs_offset = content_offset + rel_offset
+    # Resolve absolute offset using the base chosen per §3.7
+    abs_offset = offset_base + rel_offset
 
     seek(abs_offset)
     bytes = read_bytes(file_size)
@@ -536,8 +539,10 @@ When emitting a @UTF table:
 - Row data is written in column-declaration order; only **Per-row** columns
   occupy space.
 
-This repository contains no in-tree CPK writer. The references in §3.1 contain
-working implementations.
+`drv3-cpk` contains a full in-tree CPK writer (`Cpk::to_bytes`, driven by
+`drv3-cli cpk pack`); its repack is byte-for-byte faithful to the shipped DR V3
+CPKs for every load-bearing region. The references in §3.1 are additional
+clean-room implementations.
 
 ### 3.12 Reference implementations
 
@@ -664,9 +669,12 @@ Constants:
 
 | Name                    | Value | Notes |
 |-------------------------|-------|-------|
-| `SPC_BLOCK_SIZE`        | 16    | Maximum entries per flag-byte block (= 8 entries — see below). The block byte buffer is sized 16 because backreferences add 2 bytes per entry. |
 | `SPC_WINDOW_MAX_SIZE`   | 1024  | Sliding-window size in bytes |
 | `SPC_SEQUENCE_MAX_SIZE` | 65    | Maximum backreference length |
+| `SPC_SEQUENCE_MIN_SIZE` | 2     | Minimum backreference length (a backreference encodes its length as `count − 2`) |
+
+Each flag byte governs the next **8 entries** — one bit per entry — so a block is
+one flag byte followed by 8 entries of 1–2 bytes each.
 
 **Stream layout.** The compressed bytes are a sequence of *blocks*. Each block
 is:
@@ -2114,8 +2122,7 @@ Each of those belongs in a separate document.
 - **Harmony-Tools** (https://github.com/redssu/Harmony-Tools) — the
   Danganronpa-specific format readers and writers (STX, SPC, WRD, SRD,
   SpFt FontBlock, the `TextureFormat` enum, and the `xy2abc` / `abc2xy`
-  position packing). Most community tooling for Danganronpa V3 descends
-  from this project.
+  position packing).
 - **CriFsV2Lib** (https://github.com/Sewer56/CriFsV2Lib) — read-only CPK
   reader; the closest match to the read path described in §3.
 - **CriPakTools** (https://github.com/esperknight/CriPakTools) — CPK
@@ -2135,7 +2142,3 @@ Each of those belongs in a separate document.
 - **Khronos KTX / DDS pixel-format references** — supplementary sources
   for cross-checking GPU texture decoding when the Microsoft
   documentation is ambiguous.
-
----
-
-*End of document.*

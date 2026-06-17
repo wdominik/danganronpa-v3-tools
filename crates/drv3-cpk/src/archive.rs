@@ -844,10 +844,10 @@ fn pick_offset_base(
     let mut best: Option<(u64, u8)> = None;
     // TocOffset first so it wins ties.
     for &base in &[toc_offset, content_offset] {
-        if let Some(score) = candidate_score(base) {
-            if best.is_none_or(|(_, bs)| score > bs) {
-                best = Some((base, score));
-            }
+        if let Some(score) = candidate_score(base)
+            && best.is_none_or(|(_, bs)| score > bs)
+        {
+            best = Some((base, score));
         }
     }
 
@@ -1231,10 +1231,10 @@ mod tests {
         // those columns to PerRow first — real shipped CPKs declare them
         // PerRow whenever ETOC is present.
         for col in &mut cpk.header_columns {
-            if let Some(name) = &col.name {
-                if name == "EtocOffset" || name == "EtocSize" {
-                    col.storage = StorageFlag::PerRow;
-                }
+            if let Some(name) = &col.name
+                && (name == "EtocOffset" || name == "EtocSize")
+            {
+                col.storage = StorageFlag::PerRow;
             }
         }
         cpk.etoc_packet = Some(

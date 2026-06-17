@@ -665,7 +665,7 @@ pub(crate) mod utf {
     /// pair that isn't valid hex.
     pub(super) fn hex_decode(s: &str) -> anyhow::Result<Vec<u8>> {
         let s = s.trim();
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             anyhow::bail!("hex string has odd length ({})", s.len());
         }
         let mut out = Vec::with_capacity(s.len() / 2);
@@ -961,7 +961,7 @@ pub(crate) mod spc_manifest {
         pub version: u32,
         /// Hex-encoded 36 bytes from SPC header offset `0x04`.
         pub unknown1: String,
-        /// u32 at SPC header offset `0x28`.
+        /// u32 at SPC header offset `0x2C`.
         pub unknown2: u32,
         /// Entries in **on-disk order**. Order is preserved so any index-
         /// based lookups the game's loader may do continue to match.

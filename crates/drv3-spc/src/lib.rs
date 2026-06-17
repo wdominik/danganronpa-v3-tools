@@ -7,8 +7,8 @@
 //! ```text
 //! offset 0x00  4 bytes   magic "CPS."
 //! offset 0x04  0x24 bytes unknown1 — preserved verbatim
-//! offset 0x28  4 bytes   unknown2 u32 — preserved verbatim
-//! offset 0x2C  4 bytes   entry_count u32
+//! offset 0x28  4 bytes   entry_count u32
+//! offset 0x2C  4 bytes   unknown2 u32 — preserved verbatim
 //! offset 0x30  0x10 bytes padding (zeros)
 //! offset 0x40  …         "Root" marker, then each entry
 //! ```

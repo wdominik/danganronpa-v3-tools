@@ -4,8 +4,9 @@
 //! an STX file inside an SPC inside a CPK) and applies it to one or more
 //! parsed [`Cpk`](drv3_cpk::Cpk) archives in memory. The CLI front-end
 //! ([`drv3-translate-cli`]) owns the on-disk JSON schema and feeds plain
-//! Rust values into this crate; the engine itself is `serde`-free per
-//! workspace convention (see `CONTRIBUTING.md` §16).
+//! Rust values into this crate; the engine itself is `serde`-free by
+//! workspace convention — library crates expose plain Rust types and leave
+//! JSON handling to the CLIs.
 //!
 //! # Patch pipeline
 //!

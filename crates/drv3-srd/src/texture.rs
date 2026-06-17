@@ -257,7 +257,9 @@ mod tests {
     #[test]
     fn decode_bc4_crops_partial_edge_blocks() {
         // 7×5 atlas pads to 8×8 on disk (2×2 blocks); decode returns 7×5.
-        let bc4: Vec<u8> = std::iter::repeat_n(uniform_block(42), 4).flatten().collect();
+        let bc4: Vec<u8> = std::iter::repeat_n(uniform_block(42), 4)
+            .flatten()
+            .collect();
         assert_eq!(bc4.len(), 2 * 2 * BLOCK_BYTES);
         let dec = decode_bc4(&bc4, 7, 5);
         assert_eq!(dec.len(), 7 * 5);
@@ -286,7 +288,9 @@ mod tests {
         let pixels = decode_block(block);
         assert_eq!(
             pixels,
-            [255, 255, 255, 255, 255, 255, 255, 83, 255, 255, 151, 0, 255, 255, 83, 0],
+            [
+                255, 255, 255, 255, 255, 255, 255, 83, 255, 255, 151, 0, 255, 255, 83, 0
+            ],
         );
         // The standard palette for these endpoints: code 0 → r0, code 1 → r1.
         assert_eq!(build_ramp(83, 255), [83, 255, 117, 151, 186, 220, 0, 255]);

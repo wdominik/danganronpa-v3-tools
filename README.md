@@ -27,7 +27,7 @@ writing, and patching the game data files shipped with
   original encoder).
 - **DAT / WRD / SRD / SpFt** — parse and re-emit with full round-trip
   fidelity for every field reverse-engineered so far.
-- **Translation pipeline** (`drv3-translate apply | validate`) — JSON
+- **Translation pipeline** (`drv3-translate-cli apply | validate`) — JSON
   exchange format, drift detection, parallel patching across CPKs, and
   font-atlas pixel writing into the BC4-encoded `.srdv` sidecars.
 
@@ -59,11 +59,11 @@ below, except `srd inspect` — that one prints a structural tree of the
 SRD's blocks to stdout and exists as a quick orientation aid when
 triaging unfamiliar SRD containers.
 
-A second binary, `drv3-translate`, drives the translation pipeline:
+A second binary, `drv3-translate-cli`, drives the translation pipeline:
 
 ```
-drv3-translate apply     --json … --cpk … --out …
-drv3-translate validate  --json … [--cpk …]
+drv3-translate-cli apply     --json … --cpk … --out …
+drv3-translate-cli validate  --json … [--cpk …]
 ```
 
 ### Libraries
@@ -83,10 +83,12 @@ Each format has its own crate so you can pull in only what you need:
 | `drv3-spft` | `SpFt` font metadata block found inside SRD resources. |
 | `drv3-translate` | Translation patch engine — applies STX text and font glyph patches to parsed CPKs in memory. Serde-free; the CLI front-end owns the JSON schema. |
 | `drv3-cli` | The primary command-line interface — owns the dump/build JSON-exchange DTOs. |
+| `drv3-translate-cli` | CLI front-end for the translation pipeline (`apply` / `validate`) — owns the patch-JSON schema. |
 
 Format-leaf crates (`drv3-stx`, `drv3-dat`, `drv3-wrd`, `drv3-srd`,
-`drv3-spft`) depend only on `drv3-binio`. Pulling in `drv3-stx` does not
-drag in CPK or compression code. See
+`drv3-spft`) depend only on `drv3-binio` (plus the small `bitflags` crate
+for `drv3-srd`). Pulling in `drv3-stx` does not drag in CPK or compression
+code. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md#1-project-shape) for the full
 dependency graph.
 
@@ -98,6 +100,7 @@ dependency graph.
 
 ```sh
 cargo install --path crates/drv3-cli
+cargo install --path crates/drv3-translate-cli   # translation pipeline
 # or, without installing:
 cargo build --release -p drv3-cli
 # binary lands at target/release/drv3-cli
@@ -211,19 +214,21 @@ Several tools emit human-editable JSON sidecars:
 - `drv3-cli {cpk,spc} extract | pack` — alongside the file bodies,
   write/read a `manifest.json` that carries every byte of metadata
   the writer needs.
-- `drv3-translate apply | validate` — consume one or more
+- `drv3-translate-cli apply | validate` — consume one or more
   `drv3-translate/v1` translation patch JSONs.
 
 Full schemas with worked examples live in
 [`docs/json-schemas.md`](docs/json-schemas.md). SRD has no JSON
-exchange — it only supports raw byte extract / pack.
+exchange and no extract/pack — `srd inspect` only prints a structural
+block tree.
 
 ---
 
 ## Building from source
 
-- **Rust stable**, edition 2024. The minimum supported version is pinned
-  in [`rust-toolchain.toml`](rust-toolchain.toml).
+- **Rust stable**, edition 2024. The toolchain channel is pinned in
+  [`rust-toolchain.toml`](rust-toolchain.toml); the MSRV is the
+  `rust-version` in `Cargo.toml` (currently 1.96).
 - Build everything:
 
   ```sh
@@ -242,7 +247,7 @@ exchange — it only supports raw byte extract / pack.
 ## Tests
 
 ```sh
-# Workspace tests — 88 unit + integration tests, no external data needed.
+# Workspace tests — full unit + integration suite, no external data needed.
 cargo test --workspace
 
 # Real-game-data integration test — gated behind #[ignore].
@@ -267,7 +272,7 @@ cargo test -p drv3-cpk -- --ignored
 │   ├── drv3-srd/              SRD block container
 │   ├── drv3-spft/             SpFt font metadata
 │   ├── drv3-translate/        translation patch engine
-│   ├── drv3-translate-cli/    CLI binary (drv3-translate)
+│   ├── drv3-translate-cli/    CLI binary, front-end for drv3-translate
 │   └── drv3-cli/              CLI binary (drv3-cli)
 ├── docs/
 │   ├── binary-formats.md      reverse-engineering reference for DR V3 on-disk bytes
@@ -293,10 +298,10 @@ cargo test -p drv3-cpk -- --ignored
   non-deterministic — many valid encodings exist for the same
   uncompressed input — so byte-equal compressed output is not
   guaranteed. The game's decoder reads the same bytes back either way.
-- **Font-atlas pixel writing happens through `drv3-translate`.**
+- **Font-atlas pixel writing happens through `drv3-translate-cli`.**
   Standalone `spft build` only edits SPFT metadata; the atlas pixels
   live in the parallel `.srdv` SPC member and are rewritten by
-  `drv3-translate apply` when a font group carries glyph PNGs. The
+  `drv3-translate-cli apply` when a font group carries glyph PNGs. The
   BC4 re-encoder reproduces the `r0 > r1` ramp mode used by every
   shipped DR V3 atlas; the rare `r0 < r1` mode is decoded but
   re-encoded as the equivalent 8-stop linear ramp, which can shift a

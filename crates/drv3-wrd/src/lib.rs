@@ -11,13 +11,12 @@
 //! offset 0x04   2 bytes   parameter_count u16 LE
 //! offset 0x06   2 bytes   local_branch_count u16 LE
 //! offset 0x08   4 bytes   unknown1 u32 LE — preserved verbatim
-//! offset 0x0C   4 bytes   bytecode_size u32 LE
-//! offset 0x10   4 bytes   local_branches_offset u32 LE
-//! offset 0x14   4 bytes   label_offsets_offset u32 LE
-//! offset 0x18   4 bytes   label_names_offset u32 LE
-//! offset 0x1C   4 bytes   parameters_offset u32 LE
-//! offset 0x20   4 bytes   internal_strings_offset u32 LE
-//! offset 0x24   …         bytecode stream: bytes alternating between opcode
+//! offset 0x0C   4 bytes   local_branch_data_ptr u32 LE
+//! offset 0x10   4 bytes   label_offsets_ptr u32 LE
+//! offset 0x14   4 bytes   label_names_ptr u32 LE
+//! offset 0x18   4 bytes   parameters_ptr u32 LE
+//! offset 0x1C   4 bytes   strings_ptr u32 LE — 0 when strings live in the paired STX
+//! offset 0x20   …         bytecode stream: bytes alternating between opcode
 //!                         tags (often prefixed by 0x70) and u16 BE arguments
 //! …             …         local-branch table, label offsets, label names,
 //!                         parameters, optional internal-strings table

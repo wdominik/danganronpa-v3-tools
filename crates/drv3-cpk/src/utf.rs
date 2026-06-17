@@ -503,12 +503,11 @@ impl UtfTable {
         }
         for row in &self.rows {
             for col in &self.columns {
-                if col.storage.has_row_value() {
-                    if let Some(name) = &col.name {
-                        if let Some(UtfValue::String(s)) = row.get(name) {
-                            strings.intern(s);
-                        }
-                    }
+                if col.storage.has_row_value()
+                    && let Some(name) = &col.name
+                    && let Some(UtfValue::String(s)) = row.get(name)
+                {
+                    strings.intern(s);
                 }
             }
         }
