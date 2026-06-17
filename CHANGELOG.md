@@ -6,6 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Glyph geometry must be named objects.** Glyph `position` / `size` / `kerning` in
+  `drv3-translate/v1` patch JSON and `drv3-cli spft` JSON are now accepted only as named
+  objects (`{ "x", "y" }` etc.); the previously-undocumented positional-array form (`[x, y]`)
+  is rejected with a clear error. (The named-object form has been canonical since 0.1.1.)
+
 ## [0.1.3] — 2026-06-17
 
 Maintenance release — no changes to tool behavior or file formats. Toolchain and
