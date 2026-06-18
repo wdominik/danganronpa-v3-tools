@@ -40,11 +40,6 @@ const BLOCK_DIM: usize = 4;
 /// (no padding). Pixels outside the BC4 block grid that the original
 /// encoder padded with are dropped.
 ///
-/// # Errors
-///
-/// This function does not return a `Result`; it panics only if `bytes`
-/// is shorter than the required size.
-///
 /// # Panics
 ///
 /// Panics if `bytes.len()` is smaller than the BC4 byte count for the

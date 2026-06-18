@@ -1,0 +1,29 @@
+[package]
+name = "drv3-dto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "JSON DTOs and conversions for the Danganronpa V3 CLIs' dump/build exchange and translation-patch formats"
+
+[dependencies]
+drv3-cpk = { workspace = true }
+drv3-dat = { workspace = true }
+drv3-spc = { workspace = true }
+drv3-spft = { workspace = true }
+drv3-stx = { workspace = true }
+drv3-translate = { workspace = true }
+drv3-wrd = { workspace = true }
+
+anyhow = { workspace = true }
+# PNG decoder for font glyph sidecars referenced by translation-patch JSON.
+# Default features disabled, only the PNG codec enabled — keeps the dep tree tight.
+image = { version = "0.25", default-features = false, features = ["png"] }
+indexmap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

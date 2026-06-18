@@ -7,7 +7,7 @@ use drv3_cpk::Cpk;
 use drv3_translate::{DriftPolicy, PatchOptions, apply};
 
 use crate::ValidateArgs;
-use crate::dto::{load_doc, merge_docs};
+use drv3_dto::patch::{load_doc, merge_docs};
 
 pub(crate) fn run(args: &ValidateArgs) -> Result<()> {
     eprintln!("loading {} JSON file(s)…", args.json.len());
@@ -49,16 +49,22 @@ pub(crate) fn run(args: &ValidateArgs) -> Result<()> {
     // clones of the parsed CPKs. We don't write anything out, but the
     // engine's machinery surfaces every drift and missing slot.
     eprintln!("opening {} CPK(s) for drift check…", args.cpk.len());
-    let mut owned: Vec<(String, Cpk)> = Vec::with_capacity(args.cpk.len());
+    // Map every CPK up front and keep the mappings alive: parsed CPKs borrow
+    // their file bodies (zero-copy) from these maps, so the maps must outlive
+    // `owned`.
+    let mut mappings: Vec<(String, memmap2::Mmap)> = Vec::with_capacity(args.cpk.len());
     for path in &args.cpk {
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
             .map(str::to_string)
             .ok_or_else(|| anyhow::anyhow!("CPK path {} has no filename", path.display()))?;
-        let mmap = crate::mmap_file(path)?;
-        let cpk = Cpk::parse(&mmap).with_context(|| format!("parsing CPK {name}"))?;
-        owned.push((name, cpk));
+        mappings.push((name, crate::mmap_file(path)?));
+    }
+    let mut owned: Vec<(String, Cpk)> = Vec::with_capacity(mappings.len());
+    for (name, mmap) in &mappings {
+        let cpk = Cpk::parse(mmap).with_context(|| format!("parsing CPK {name}"))?;
+        owned.push((name.clone(), cpk));
     }
 
     let mut view: Vec<(&str, &mut Cpk)> = owned.iter_mut().map(|(n, c)| (n.as_str(), c)).collect();

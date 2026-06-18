@@ -79,7 +79,10 @@ pub enum ColumnType {
 }
 
 impl ColumnType {
-    fn from_tag(tag: &str) -> Option<Self> {
+    /// Parse a column type from its on-disk UTF-8 tag (`"u8"`, `"ascii"`, …),
+    /// or `None` if the tag is unrecognized. This is the canonical tag mapping;
+    /// the CLI JSON `type` field reuses it so the two never drift.
+    pub fn from_tag(tag: &str) -> Option<Self> {
         Some(match tag {
             "u8" => Self::U8,
             "u16" => Self::U16,
@@ -99,7 +102,8 @@ impl ColumnType {
         })
     }
 
-    fn tag(self) -> &'static str {
+    /// The on-disk UTF-8 tag for this column type (`"u8"`, `"ascii"`, …).
+    pub fn tag(self) -> &'static str {
         match self {
             Self::U8 => "u8",
             Self::U16 => "u16",

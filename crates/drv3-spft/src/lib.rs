@@ -237,22 +237,19 @@ impl SpFt {
         w.write_bytes(&bit_flags);
         debug_assert_eq!(w.position(), index_table_ptr);
 
-        // Index table — zero-fill, then patch in one entry per glyph window.
-        let index_start = w.position();
-        w.write_fill(index_table_size, 0);
+        // Index table — build it standalone, then append. Each 32-codepoint
+        // window's slot holds the bbox index of the first glyph in that window.
+        let mut index_table = vec![0u8; index_table_size];
         let mut written_windows: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
-        let mut buf = w.into_inner();
         for (idx, glyph) in glyphs.iter().enumerate() {
             let char_offset = ((glyph.codepoint / 8) & !0b11) as usize;
             if written_windows.insert(char_offset) {
-                let target = index_start + char_offset;
-                buf[target..target + 4].copy_from_slice(&(idx as u32).to_le_bytes());
+                index_table[char_offset..char_offset + 4]
+                    .copy_from_slice(&(idx as u32).to_le_bytes());
             }
         }
-        let mut w = Writer::with_capacity(total_size);
-        w.write_bytes(&buf);
-        drop(buf);
+        w.write_bytes(&index_table);
         debug_assert_eq!(w.position(), bbox_table_ptr);
 
         // BBox table.
@@ -295,7 +292,10 @@ impl SpFt {
 ///
 /// Together a/b/c encode 12 + 12 = 24 bits in 3 bytes with no wasted bits.
 #[must_use]
-#[allow(clippy::many_single_char_names)]
+#[expect(
+    clippy::many_single_char_names,
+    reason = "the a/b/c byte triple and x/y coordinates are the format's own field names"
+)]
 pub fn xy_to_abc(x: u16, y: u16) -> (u8, u8, u8) {
     let a = (x & 0xFF) as u8;
     let b = (((y & 0xF) << 4) | ((x >> 8) & 0xF)) as u8;
@@ -306,7 +306,10 @@ pub fn xy_to_abc(x: u16, y: u16) -> (u8, u8, u8) {
 /// Unpack three bytes into two 12-bit unsigned coordinates. Inverse of
 /// [`xy_to_abc`]; see that function for the bit layout.
 #[must_use]
-#[allow(clippy::many_single_char_names)]
+#[expect(
+    clippy::many_single_char_names,
+    reason = "the a/b/c byte triple and x/y coordinates are the format's own field names"
+)]
 pub fn abc_to_xy(a: u8, b: u8, c: u8) -> (u16, u16) {
     let x = u16::from(a) | ((u16::from(b) & 0xF) << 8);
     let y = ((u16::from(b) >> 4) & 0xF) | (u16::from(c) << 4);

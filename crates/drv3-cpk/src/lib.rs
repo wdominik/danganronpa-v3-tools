@@ -29,21 +29,6 @@
 //! - ETOC / ITOC / GTOC packets are passed through verbatim as opaque
 //!   bytes; only their position in the layout matters to the game.
 
-// CPK uses the same CRI-style field names across many columns
-// (TocOffset/TocSize/EtocOffset/EtocSize/…), and the @UTF schema-builder code
-// is inherently long because every column type/storage combination is
-// enumerated explicitly.
-#![allow(
-    clippy::similar_names,
-    clippy::too_many_lines,
-    clippy::match_same_arms,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::uninlined_format_args,
-    clippy::map_unwrap_or,
-    clippy::unnecessary_wraps,
-    clippy::needless_pass_by_value
-)]
-
 pub mod archive;
 pub mod utf;
 

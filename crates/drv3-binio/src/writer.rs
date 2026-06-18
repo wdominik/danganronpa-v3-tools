@@ -15,8 +15,8 @@ pub struct Writer {
 #[derive(Debug, Clone, Copy)]
 #[must_use = "patches must be filled in with Writer::patch_*"]
 pub struct Patch {
-    pub pos: usize,
-    pub len: usize,
+    pos: usize,
+    len: usize,
 }
 
 impl Writer {
@@ -68,10 +68,6 @@ impl Writer {
     }
 
     pub fn reserve_u32_le(&mut self) -> Patch {
-        self.reserve(4)
-    }
-
-    pub fn reserve_u32_be(&mut self) -> Patch {
         self.reserve(4)
     }
 

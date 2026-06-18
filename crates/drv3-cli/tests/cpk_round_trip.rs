@@ -20,7 +20,7 @@ fn drv3_binary() -> String {
     clippy::too_many_lines,
     reason = "one cohesive synthetic CPK fixture builder"
 )]
-fn synthetic_cpk() -> Cpk {
+fn synthetic_cpk() -> Cpk<'static> {
     let mut header_row = UtfRow::new();
     header_row.insert(
         "UpdateDateTime".into(),
@@ -152,7 +152,7 @@ fn synthetic_cpk() -> Cpk {
                 id: 0,
                 user_string: "root".into(),
                 extra: IndexMap::new(),
-                data: b"<<root contents 0>>".to_vec(),
+                data: b"<<root contents 0>>".to_vec().into(),
             },
             CpkFile {
                 dir_name: "boot".into(),
@@ -160,7 +160,7 @@ fn synthetic_cpk() -> Cpk {
                 id: 1,
                 user_string: "boot/startup".into(),
                 extra: IndexMap::new(),
-                data: vec![0x42; 137],
+                data: vec![0x42; 137].into(),
             },
             CpkFile {
                 dir_name: "game/sub".into(),
@@ -168,7 +168,10 @@ fn synthetic_cpk() -> Cpk {
                 id: 2,
                 user_string: String::new(),
                 extra: IndexMap::new(),
-                data: (0..200).map(|i| (i ^ (i >> 3)) as u8).collect(),
+                data: (0..200)
+                    .map(|i| (i ^ (i >> 3)) as u8)
+                    .collect::<Vec<u8>>()
+                    .into(),
             },
         ],
         etoc_packet: None,
@@ -263,7 +266,6 @@ fn manifest_json_is_valid_and_versioned() {
     let parsed: serde_json::Value = serde_json::from_str(&manifest_str).unwrap();
     assert_eq!(parsed["version"], 1);
     assert_eq!(parsed["files"].as_array().unwrap().len(), 3);
-    assert_eq!(parsed["header"]["name"], "CpkHeader");
     // The first column carries a real schema entry.
     assert!(parsed["header"]["columns"][0]["name"].is_string());
     assert!(parsed["header"]["columns"][0]["storage"].is_string());

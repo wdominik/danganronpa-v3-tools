@@ -12,13 +12,13 @@ description = "Translation patch engine for Danganronpa V3 game data"
 drv3-binio = { workspace = true }
 drv3-cpk = { workspace = true }
 drv3-spc = { workspace = true }
-drv3-stx = { workspace = true }
-drv3-srd = { workspace = true }
 drv3-spft = { workspace = true }
+drv3-srd = { workspace = true }
+drv3-stx = { workspace = true }
 
-thiserror = { workspace = true }
 indexmap = { workspace = true }
 rayon = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

@@ -173,6 +173,14 @@ impl UtfType {
         }
     }
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Option guards a future variable-size UtfType; call sites assert the current all-fixed invariant via .expect()"
+    )]
+    #[expect(
+        clippy::match_same_arms,
+        reason = "the Data arm's 8 bytes are a u32 offset+size pair, kept distinct from the 8-byte scalar types for clarity"
+    )]
     fn fixed_size(self) -> Option<usize> {
         Some(match self {
             Self::U8 | Self::S8 => 1,
@@ -291,6 +299,10 @@ impl UtfTable {
     /// Panics only if a new variable-size variant is added to [`UtfType`]
     /// without updating `fixed_size()` — a code-change-time invariant,
     /// not anything user input can trigger.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the schema, row, string-pool and data-blob passes read as one linear parse"
+    )]
     pub fn parse(input: &[u8]) -> BinResult<Self> {
         let mut r = Reader::new(input);
         r.expect_magic(MAGIC)?;
@@ -340,19 +352,6 @@ impl UtfTable {
                     pos: strings_offset + off,
                     source,
                 })
-        };
-
-        let read_blob = |off: usize, size: usize| -> BinResult<Vec<u8>> {
-            if off + size > data_blob.len() {
-                return Err(BinError::malformed(
-                    0,
-                    format!(
-                        "data blob ({off}, {size}) past blob ({} bytes)",
-                        data_blob.len()
-                    ),
-                ));
-            }
-            Ok(data_blob[off..off + size].to_vec())
         };
 
         let name = read_pool_string(table_name_offset)?;
@@ -411,10 +410,7 @@ impl UtfTable {
         if running_row_offset != row_size {
             return Err(BinError::malformed(
                 0,
-                format!(
-                    "row_size mismatch: schema sum {} vs header {}",
-                    running_row_offset, row_size
-                ),
+                format!("row_size mismatch: schema sum {running_row_offset} vs header {row_size}"),
             ));
         }
         let mut rows: Vec<UtfRow> = Vec::with_capacity(row_count);
@@ -458,10 +454,6 @@ impl UtfTable {
             rows.push(row);
         }
 
-        // Validate that we touched only inside the table.
-        let _ = read_blob;
-        let _ = data_blob;
-
         Ok(Self {
             name,
             columns,
@@ -486,6 +478,14 @@ impl UtfTable {
     /// (e.g. a string that was just interned isn't found in the pool, or
     /// a new variable-size [`UtfType`] is added without updating
     /// `fixed_size()`). User input cannot trigger these.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "assembling the four @UTF sections (schema, rows, strings, data) in order reads better unsplit"
+    )]
+    #[expect(
+        clippy::similar_names,
+        reason = "the *_offset_rel / *_size section locals mirror the on-disk header field names"
+    )]
     pub fn to_bytes(&self) -> BinResult<Vec<u8>> {
         let mut w = Writer::new();
 
@@ -706,6 +706,10 @@ fn read_typed_value(
     })
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "mirrors the fallible read_typed_value; kept fallible for symmetric ?-chaining and future encodings"
+)]
 fn write_typed_value(
     w: &mut Writer,
     value: &UtfValue,

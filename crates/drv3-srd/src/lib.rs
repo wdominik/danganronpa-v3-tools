@@ -321,10 +321,13 @@ fn parse_rsi(data: &[u8]) -> BinResult<RsiData> {
         .bytes(resource_string_list_offset - resource_data_start)?
         .to_vec();
 
+    // Each string runs to its null terminator. The `while` bound stops after
+    // the last terminator; a trailing empty string (two nulls in a row at the
+    // end) is captured as a final empty entry, matching what `serialize_rsi`
+    // writes back.
     let mut resource_strings: Vec<Vec<u8>> = Vec::new();
     while r.position() < data.len() {
         let start = r.position();
-        // read raw bytes until null
         let mut s = Vec::new();
         loop {
             if r.position() >= data.len() {
@@ -335,11 +338,6 @@ fn parse_rsi(data: &[u8]) -> BinResult<RsiData> {
                 break;
             }
             s.push(b);
-        }
-        if s.is_empty() && r.position() >= data.len() {
-            // trailing null is fine; we already consumed it
-            resource_strings.push(s);
-            break;
         }
         resource_strings.push(s);
     }

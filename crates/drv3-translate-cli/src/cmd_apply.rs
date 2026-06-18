@@ -10,8 +10,8 @@ use drv3_cpk::Cpk;
 use drv3_translate::{PatchOptions, PatchReport, apply};
 use serde::Serialize;
 
-use crate::dto::{load_doc, merge_docs};
 use crate::{ApplyArgs, OutputMode, mmap_file};
+use drv3_dto::patch::{load_doc, merge_docs};
 
 pub(crate) fn run(args: &ApplyArgs) -> Result<()> {
     if args.threads > 0 {
@@ -73,9 +73,9 @@ pub(crate) fn run(args: &ApplyArgs) -> Result<()> {
         apply(&mut view, &set, &opts)?
     };
 
-    // Drop the input mmaps now that we're done reading them — frees the
-    // file handles before we start the large write.
-    drop(mappings);
+    // The input mmaps stay mapped through the write below: file bodies are
+    // borrowed (zero-copy) from them, and repack/extract reads those bodies as
+    // it serializes. They unmap when `run` returns.
 
     eprintln!("{}", summarize_report(&report));
 
@@ -444,7 +444,7 @@ mod tests {
                 id: 0,
                 user_string: String::new(),
                 extra: IndexMap::new(),
-                data: bytes.to_vec(),
+                data: bytes.to_vec().into(),
             }],
             etoc_packet: None,
             itoc_packet: None,

@@ -16,32 +16,37 @@ the official recommendation wins — please open a PR that updates this file.
 
 ## 1. Project shape
 
-The repository is a Cargo workspace with twelve crates under `crates/`:
+The repository is a Cargo workspace with thirteen crates under `crates/`:
 
 ```
-drv3-binio  ──┬── drv3-cpk
-              ├── drv3-compression ── drv3-spc
-              ├── drv3-stx
+drv3-binio  ──┬── drv3-compression ── drv3-spc
+              ├── drv3-cpk
               ├── drv3-dat
-              ├── drv3-wrd
-              ├── drv3-srd
               ├── drv3-spft
-              ├── drv3-translate ── drv3-translate-cli
-              └── drv3-cli ── (depends on every format crate above)
+              ├── drv3-srd
+              ├── drv3-stx
+              ├── drv3-translate
+              └── drv3-wrd
+
+drv3-dto ── serde DTOs over the format crates + drv3-translate
+drv3-cli, drv3-translate-cli ── the two binaries; both depend on drv3-dto
 ```
 
-- **Format crates** (`drv3-cpk`, `drv3-spc`, `drv3-stx`, `drv3-dat`,
-  `drv3-wrd`, `drv3-srd`, `drv3-spft`) parse and write one file format
+- **Format crates** (`drv3-cpk`, `drv3-dat`, `drv3-spc`, `drv3-spft`,
+  `drv3-srd`, `drv3-stx`, `drv3-wrd`) parse and write one file format
   each. They share no format knowledge — each owns its container types.
 - **Foundation crates** (`drv3-binio`, `drv3-compression`) provide
   primitives reused by the format crates.
 - **`drv3-translate`** is a library: a serde-free patch engine that
-  consumes the format crates (`drv3-cpk`, `drv3-spc`, `drv3-stx`,
-  `drv3-srd`, `drv3-spft`) and applies translation patches to parsed
+  consumes the format crates (`drv3-cpk`, `drv3-spc`, `drv3-spft`,
+  `drv3-srd`, `drv3-stx`) and applies translation patches to parsed
   CPKs in memory.
-- **`drv3-cli`** and **`drv3-translate-cli`** are the two binaries.
-  `drv3-cli` owns the dump/build JSON-exchange DTOs; `drv3-translate-cli`
-  owns the patch-JSON schema. Library crates stay serde-free.
+- **`drv3-dto`** is the serde layer: it owns both JSON schemas — the
+  dump/build/extract-pack exchange DTOs and the translation-patch schema —
+  and converts between them and the plain library types. Every other library
+  crate stays serde-free.
+- **`drv3-cli`** and **`drv3-translate-cli`** are the two binaries; both
+  depend on `drv3-dto` for their JSON.
 
 Each crate's `lib.rs` opens with a module-level `//!` doc comment that
 describes the format's on-disk layout. **Read that header before touching
@@ -446,7 +451,7 @@ cast_lossless = "allow"
 ### Active lints worth knowing
 
 - **`unsafe_code = "deny"`** — every unsafe block requires a per-site
-  `#[allow(unsafe_code)]` with a `// SAFETY: …` comment. Workspace-wide
+  `#[expect(unsafe_code, reason = …)]` with a `// SAFETY: …` comment. Workspace-wide
   there are exactly two such sites (the mmap calls in `drv3-cli` and
   `drv3-translate-cli`).
 - **`pedantic = warn`** — the full pedantic group is enabled. New
@@ -523,7 +528,7 @@ message when a panic is genuinely unreachable.
 
 - **Default**: workspace-wide `unsafe_code = "deny"`. No unsafe in
   libraries.
-- **Exception**: two `#[allow(unsafe_code)]` sites, in
+- **Exception**: two `#[expect(unsafe_code, reason = …)]` sites, in
   `drv3-cli/src/main.rs::mmap_file` and
   `drv3-translate-cli/src/main.rs::mmap_file`, both for `memmap2::Mmap::map`,
   each with a `// SAFETY: …` comment explaining the contract.
@@ -617,9 +622,9 @@ are two views of the same understanding.
   fact must also live in the code's comments in plain prose.
 - **Docs may reference the code** for implementation specifics, since
   the docs are written for humans browsing the project. The JSON
-  schemas in `docs/json-schemas.md` point at
-  `crates/drv3-cli/src/dto.rs` and `crates/drv3-translate-cli/src/dto.rs`
-  as their authoritative sources; the binary-format reference points
+  schemas in `docs/json-schemas.md` point at the `drv3-dto` crate
+  (`src/lib.rs` for the exchange DTOs, `src/patch.rs` for the patch schema)
+  as their authoritative source; the binary-format reference points
   at the per-crate `lib.rs` module headers.
 
 Both can evolve independently: the docs as our understanding of the

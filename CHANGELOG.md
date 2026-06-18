@@ -6,12 +6,57 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-06-18
+
+### Added
+
+- **Lookup helpers for navigating the CPK → SPC → STX nesting from your own code:**
+  `Cpk::file` / `file_mut`, `Spc::entry` / `entry_mut`, and `StxTable::entry` / `entry_mut` find
+  a file, member, or string by name / id without a manual `.iter().find(...)`. The `Cpk::parse`
+  and `Spc::parse` docs also gained usage examples.
+
 ### Changed
 
 - **Glyph geometry must be named objects.** Glyph `position` / `size` / `kerning` in
   `drv3-translate/v1` patch JSON and `drv3-cli spft` JSON are now accepted only as named
   objects (`{ "x", "y" }` etc.); the previously-undocumented positional-array form (`[x, y]`)
   is rejected with a clear error. (The named-object form has been canonical since 0.1.1.)
+- **`Cpk` borrows file bodies instead of copying them (zero-copy parse).** `Cpk` and `CpkFile`
+  now carry a lifetime — `Cpk<'a>`, with `CpkFile::data: Cow<'a, [u8]>`. `Cpk::parse` borrows
+  each body directly from the input buffer, so `drv3-cli cpk list` / `cpk extract` no longer
+  copy gigabytes of bodies onto the heap; the translation engine replaces patched bodies with
+  owned bytes (`Cow::Owned`), and a `Cpk` assembled from owned data is `Cpk<'static>`. Because
+  bodies are borrowed, `drv3-translate-cli apply` keeps the input CPK memory-mapped through the
+  output write. Breaking for direct `drv3-cpk` consumers that name `Cpk` / `CpkFile` in
+  signatures; the common `Cpk::parse(&bytes)` + `file.data.len()` usage is source-compatible.
+- **JSON DTOs consolidated into a new `drv3-dto` crate.** Both CLIs' serde DTOs — the dump/build
+  exchange schema and the translation-patch schema — now live in one crate, with the glyph
+  geometry types and the map-only deserializer defined once. `drv3_dat::ColumnType::{tag,
+  from_tag}` are now public so the DAT JSON `type` mapping reuses the on-disk tag mapping rather
+  than duplicating it. Internal restructure; no CLI behavior change.
+- **Dropped the always-constant `header.name` field from the CPK extract `manifest.json`.** It
+  was written but never read back (`Cpk::to_bytes` hardcodes the `@UTF` table name); older
+  manifests that still carry the field load fine, since it is ignored.
+- **Internal quality pass (no behavior change):** zero-copy SpFt index-table serialization,
+  simplified SRD resource-string parsing, clearer internal names (`Cpk::resolve_align`,
+  `read_packet`), workspace-wide per-site `#[expect(reason = …)]` lint discipline (dropping the
+  `drv3-cpk` blanket `allow`), and assorted doc/test fixes.
+
+### Removed
+
+- **Trimmed unused public surface from `drv3-binio` and `drv3-translate`** (pre-1.0, no in-tree
+  users): `Writer::reserve_u32_be` (byte-identical to `reserve_u32_le` — reserving placeholder
+  bytes carries no endianness; the endianness lives in the matching `patch_*` call),
+  `Reader::len` (duplicated `Reader::buffer().len()` and was inconsistent with
+  `Reader::is_empty`), and the never-constructed `TranslateError::CpkFileNotFound` /
+  `SpcMemberNotFound` variants (missing files/members are reported as `PatchReport` entries, not
+  hard errors). `Patch`'s fields are now private — it is an opaque token produced by
+  `Writer::reserve*` and consumed by `Writer::patch*`.
+
+### Fixed
+
+- **SPC-LZSS decompression now reports a malformed back-reference as
+  `SpcError::BadBackreference`** instead of the misleading `UnexpectedEof`.
 
 ## [0.1.3] — 2026-06-17
 
@@ -126,7 +171,8 @@ First public release.
 - **`drv3-cli roundtrip`** sanity-check subcommand: parse a file,
   re-emit it, exit non-zero if the bytes diverge.
 
-[Unreleased]: https://github.com/wdominik/danganronpa-v3-tools/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/wdominik/danganronpa-v3-tools/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.4
 [0.1.3]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.3
 [0.1.2]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.2
 [0.1.1]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.1

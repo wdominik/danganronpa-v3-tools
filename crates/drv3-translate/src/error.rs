@@ -34,17 +34,6 @@ pub enum TranslateError {
     #[error("no input CPK named {0} was supplied")]
     CpkNotFound(String),
 
-    /// CPK doesn't contain the file the translation references.
-    #[error("CPK {cpk} has no file at {cpk_path}")]
-    CpkFileNotFound { cpk: String, cpk_path: String },
-
-    /// SPC doesn't contain the member the translation references.
-    #[error("SPC {cpk_path} has no member named {spc_member}")]
-    SpcMemberNotFound {
-        cpk_path: String,
-        spc_member: String,
-    },
-
     /// Drift detected and [`crate::DriftPolicy::Error`] is set.
     #[error(
         "source-string drift at {cpk_path}::{spc_member} table {table} index {index}: \

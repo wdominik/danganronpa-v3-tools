@@ -6,6 +6,7 @@
 //!
 //! [`StxEntry::id`]: drv3_stx::StxEntry::id
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use drv3_cpk::{Cpk, CpkFile};
@@ -51,7 +52,7 @@ use crate::report::{DriftRecord, MissingRecord, PatchReport};
 /// (missing slots, drift under warn/skip policies) go into the
 /// [`PatchReport`] instead.
 pub fn apply(
-    cpks: &mut [(&str, &mut Cpk)],
+    cpks: &mut [(&str, &mut Cpk<'_>)],
     set: &TranslationSet,
     opts: &PatchOptions,
 ) -> Result<PatchReport, TranslateError> {
@@ -242,10 +243,10 @@ fn patch_spc(
         }
     }
 
-    cpk_file.data = spc.to_bytes().map_err(|e| TranslateError::Spc {
+    cpk_file.data = Cow::Owned(spc.to_bytes().map_err(|e| TranslateError::Spc {
         cpk_path: cpk_path.to_string(),
         source: e,
-    })?;
+    })?);
     Ok(report)
 }
 

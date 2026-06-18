@@ -1,16 +1,22 @@
-//! JSON DTO types for the CLI's `dump` / `build` subcommands.
+//! JSON DTOs and conversions for the Danganronpa V3 CLIs.
 //!
-//! Libraries are deliberately serde-free; the CLI owns the JSON exchange
-//! format and converts between DTOs and library types. This decouples the
-//! on-disk JSON schema from internal library APIs and keeps `serde` /
-//! `serde_json` out of the library dependency graph.
+//! This crate owns the project's serde layer: the `dump` / `build` /
+//! extract-pack **exchange** schema (the per-format modules below plus the CPK
+//! and SPC manifests) and the translation-**patch** schema ([`patch`]). The
+//! format library crates stay serde-free — they expose plain Rust types, and
+//! this crate maps them to and from the human-editable JSON the CLIs read and
+//! write. Glyph geometry shared by `spft` and `patch` lives in an internal
+//! `glyph` module.
 
 #![allow(clippy::wildcard_imports)]
+
+mod glyph;
+pub mod patch;
 
 use serde::{Deserialize, Serialize};
 
 /// JSON shape for an STX file.
-pub(crate) mod stx {
+pub mod stx {
     use super::*;
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -75,7 +81,7 @@ pub(crate) mod stx {
     }
 }
 
-pub(crate) mod dat {
+pub mod dat {
     use super::*;
     use drv3_dat::{Cell, Column, ColumnType, Dat};
 
@@ -110,45 +116,6 @@ pub(crate) mod dat {
         Label(Vec<String>),
         Refer(Vec<String>),
         Utf16(Vec<String>),
-    }
-
-    fn column_type_tag(ty: ColumnType) -> &'static str {
-        match ty {
-            ColumnType::U8 => "u8",
-            ColumnType::U16 => "u16",
-            ColumnType::U32 => "u32",
-            ColumnType::U64 => "u64",
-            ColumnType::S8 => "s8",
-            ColumnType::S16 => "s16",
-            ColumnType::S32 => "s32",
-            ColumnType::S64 => "s64",
-            ColumnType::F32 => "f32",
-            ColumnType::F64 => "f64",
-            ColumnType::Ascii => "ascii",
-            ColumnType::Label => "label",
-            ColumnType::Refer => "refer",
-            ColumnType::Utf16 => "utf16",
-        }
-    }
-
-    fn column_type_from_tag(tag: &str) -> Option<ColumnType> {
-        Some(match tag {
-            "u8" => ColumnType::U8,
-            "u16" => ColumnType::U16,
-            "u32" => ColumnType::U32,
-            "u64" => ColumnType::U64,
-            "s8" => ColumnType::S8,
-            "s16" => ColumnType::S16,
-            "s32" => ColumnType::S32,
-            "s64" => ColumnType::S64,
-            "f32" => ColumnType::F32,
-            "f64" => ColumnType::F64,
-            "ascii" => ColumnType::Ascii,
-            "label" => ColumnType::Label,
-            "refer" => ColumnType::Refer,
-            "utf16" => ColumnType::Utf16,
-            _ => return None,
-        })
     }
 
     fn cell_to_json(c: &Cell) -> CellJson {
@@ -197,7 +164,7 @@ pub(crate) mod dat {
                     .iter()
                     .map(|c| ColumnJson {
                         name: c.name.clone(),
-                        ty: column_type_tag(c.ty).to_string(),
+                        ty: c.ty.tag().to_string(),
                         count: c.count,
                     })
                     .collect(),
@@ -217,7 +184,7 @@ pub(crate) mod dat {
                 .schema
                 .into_iter()
                 .map(|c| {
-                    let ty = column_type_from_tag(&c.ty)
+                    let ty = ColumnType::from_tag(&c.ty)
                         .ok_or_else(|| anyhow::anyhow!("unknown column type {:?}", c.ty))?;
                     Ok::<_, anyhow::Error>(Column {
                         name: c.name,
@@ -236,7 +203,7 @@ pub(crate) mod dat {
     }
 }
 
-pub(crate) mod spft {
+pub mod spft {
     use super::*;
     use drv3_spft::{Glyph, SpFt};
 
@@ -257,82 +224,7 @@ pub(crate) mod spft {
         pub kerning: KerningJson,
     }
 
-    /// Generate a map-only [`Deserialize`] for a fixed-shape struct: it accepts
-    /// a JSON object carrying the named fields and rejects every other shape —
-    /// notably a JSON array, so the legacy positional form (`[x, y]`) errors
-    /// instead of silently mapping onto the fields in declaration order.
-    macro_rules! object_only {
-        ($t:ident, $expecting:literal, { $($f:ident : $ty:ty),+ $(,)? }) => {
-            impl<'de> serde::Deserialize<'de> for $t {
-                fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                    struct FieldVisitor;
-                    impl<'de> serde::de::Visitor<'de> for FieldVisitor {
-                        type Value = $t;
-                        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                            f.write_str($expecting)
-                        }
-                        fn visit_map<M: serde::de::MapAccess<'de>>(
-                            self,
-                            mut map: M,
-                        ) -> Result<$t, M::Error> {
-                            $(let mut $f: Option<$ty> = None;)+
-                            while let Some(key) = map.next_key::<String>()? {
-                                match key.as_str() {
-                                    $(stringify!($f) => {
-                                        if $f.is_some() {
-                                            return Err(serde::de::Error::duplicate_field(stringify!($f)));
-                                        }
-                                        $f = Some(map.next_value()?);
-                                    })+
-                                    other => {
-                                        return Err(serde::de::Error::unknown_field(
-                                            other,
-                                            &[$(stringify!($f)),+],
-                                        ));
-                                    }
-                                }
-                            }
-                            Ok($t {
-                                $($f: $f
-                                    .ok_or_else(|| serde::de::Error::missing_field(stringify!($f)))?,)+
-                            })
-                        }
-                    }
-                    deserializer.deserialize_map(FieldVisitor)
-                }
-            }
-        };
-    }
-
-    /// Top-left atlas coordinate of a glyph, in pixels (12-bit each).
-    #[derive(Debug, Serialize)]
-    pub struct PositionJson {
-        pub x: u16,
-        pub y: u16,
-    }
-    object_only!(PositionJson, "a glyph position object with `x` and `y`", { x: u16, y: u16 });
-
-    /// Glyph bounding-box dimensions, in pixels.
-    #[derive(Debug, Serialize)]
-    pub struct SizeJson {
-        pub width: u8,
-        pub height: u8,
-    }
-    object_only!(SizeJson, "a glyph size object with `width` and `height`", { width: u8, height: u8 });
-
-    /// Per-glyph spacing deltas, in signed pixels: `left`/`right` are the
-    /// horizontal side bearings, `vertical` shifts the glyph up/down.
-    #[derive(Debug, Serialize)]
-    pub struct KerningJson {
-        pub left: i8,
-        pub right: i8,
-        pub vertical: i8,
-    }
-    object_only!(
-        KerningJson,
-        "a glyph kerning object with `left`, `right`, and `vertical`",
-        { left: i8, right: i8, vertical: i8 }
-    );
+    use crate::glyph::{KerningJson, PositionJson, SizeJson};
 
     impl From<&SpFt> for SpFtJson {
         fn from(s: &SpFt) -> Self {
@@ -437,7 +329,7 @@ pub(crate) mod spft {
     }
 }
 
-pub(crate) mod wrd {
+pub mod wrd {
     use super::*;
     use drv3_wrd::{Command, LocalBranch, Wrd};
 
@@ -526,7 +418,7 @@ pub(crate) mod wrd {
 
 /// Serde-friendly mirror of `drv3_cpk::UtfValue` and the surrounding schema
 /// types, used by the CPK manifest.
-pub(crate) mod utf {
+pub mod utf {
     use super::*;
     use drv3_cpk::{StorageFlag, UtfColumn, UtfType, UtfValue};
 
@@ -785,25 +677,25 @@ pub(crate) mod utf {
 
 /// CPK extract/pack manifest: persists the full header + TOC metadata that
 /// `Cpk::to_bytes` needs but file bodies alone can't carry.
-pub(crate) mod cpk_manifest {
+pub mod cpk_manifest {
     use std::collections::BTreeMap;
 
     use super::utf::{UtfColumnJson, UtfValueJson};
     use super::*;
     use drv3_cpk::{Cpk, CpkFile, UtfColumn, UtfRow, UtfValue};
 
-    pub(crate) const MANIFEST_FILENAME: &str = "manifest.json";
-    pub(crate) const ETOC_SIDECAR: &str = "_etoc.bin";
-    pub(crate) const ITOC_SIDECAR: &str = "_itoc.bin";
-    pub(crate) const GTOC_SIDECAR: &str = "_gtoc.bin";
+    pub const MANIFEST_FILENAME: &str = "manifest.json";
+    pub const ETOC_SIDECAR: &str = "_etoc.bin";
+    pub const ITOC_SIDECAR: &str = "_itoc.bin";
+    pub const GTOC_SIDECAR: &str = "_gtoc.bin";
 
     /// Current manifest schema version. The project is pre-1.0; the schema
     /// may change in place without bumping this number — readers reject any
     /// other value. Versioning starts on 1.0.0.
-    pub(crate) const MANIFEST_VERSION: u32 = 1;
+    pub const MANIFEST_VERSION: u32 = 1;
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub(crate) struct CpkManifestJson {
+    pub struct CpkManifestJson {
         pub version: u32,
         pub header: HeaderJson,
         /// TOC `@UTF` column schema, preserved verbatim from extract so pack
@@ -820,9 +712,7 @@ pub(crate) mod cpk_manifest {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub(crate) struct HeaderJson {
-        /// `@UTF` table name (always `"CpkHeader"` in observed files).
-        pub name: String,
+    pub struct HeaderJson {
         /// Column schema, in declaration order — preserves storage flags and types.
         pub columns: Vec<UtfColumnJson>,
         /// Per-row values for `PerRow` columns. Keys are column names; the
@@ -832,7 +722,7 @@ pub(crate) mod cpk_manifest {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub(crate) struct CpkFileJson {
+    pub struct CpkFileJson {
         /// Forward-slash relative path inside the extract directory (`<dir_name>/<file_name>`).
         pub path: String,
         pub id: u32,
@@ -843,8 +733,8 @@ pub(crate) mod cpk_manifest {
         pub extra: BTreeMap<String, UtfValueJson>,
     }
 
-    impl From<&Cpk> for CpkManifestJson {
-        fn from(cpk: &Cpk) -> Self {
+    impl From<&Cpk<'_>> for CpkManifestJson {
+        fn from(cpk: &Cpk<'_>) -> Self {
             let columns: Vec<UtfColumnJson> =
                 cpk.header_columns.iter().map(UtfColumnJson::from).collect();
             let toc_columns: Vec<UtfColumnJson> =
@@ -869,11 +759,7 @@ pub(crate) mod cpk_manifest {
                 .collect();
             Self {
                 version: MANIFEST_VERSION,
-                header: HeaderJson {
-                    name: "CpkHeader".to_string(),
-                    columns,
-                    row,
-                },
+                header: HeaderJson { columns, row },
                 toc_columns,
                 files,
                 etoc_packet: cpk.etoc_packet.as_ref().map(|_| ETOC_SIDECAR.into()),
@@ -883,16 +769,22 @@ pub(crate) mod cpk_manifest {
         }
     }
 
-    /// Realise a `Cpk` from the manifest + file bodies + optional packet bytes
-    /// supplied by the caller. The caller is responsible for resolving paths.
     impl CpkManifestJson {
-        pub(crate) fn into_cpk(
+        /// Realize a [`Cpk`] from the manifest plus the file-body bytes and
+        /// optional packet bytes supplied by the caller.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the manifest schema `version` is unsupported,
+        /// `toc_columns` is empty, a header/TOC column or value fails to
+        /// convert, or a file path is absolute or contains `..` / `.` segments.
+        pub fn into_cpk(
             self,
             file_bodies: Vec<(CpkFileJson, Vec<u8>)>,
             etoc: Option<Vec<u8>>,
             itoc: Option<Vec<u8>>,
             gtoc: Option<Vec<u8>>,
-        ) -> anyhow::Result<Cpk> {
+        ) -> anyhow::Result<Cpk<'static>> {
             if self.version != MANIFEST_VERSION {
                 anyhow::bail!(
                     "manifest schema version {} is not supported (this build expects {})",
@@ -935,7 +827,7 @@ pub(crate) mod cpk_manifest {
                     id: meta.id,
                     user_string: meta.user_string,
                     extra,
-                    data,
+                    data: data.into(),
                 });
             }
 
@@ -1011,20 +903,20 @@ pub(crate) mod cpk_manifest {
 /// `unknown2` archive-level bytes, per-entry `compression_flag` and
 /// `unknown_flag`, and the original entry order — all of which the
 /// pre-manifest pack path was zeroing or normalizing away.
-pub(crate) mod spc_manifest {
+pub mod spc_manifest {
     use super::*;
     use drv3_spc::{COMPRESSION_LZSS, COMPRESSION_STORED, Spc, SpcEntry};
 
-    pub(crate) const MANIFEST_FILENAME: &str = "manifest.json";
+    pub const MANIFEST_FILENAME: &str = "manifest.json";
     /// Pre-1.0 the schema may change in place without bumping this value.
     /// Versioning begins on 1.0.0.
-    pub(crate) const MANIFEST_VERSION: u32 = 1;
+    pub const MANIFEST_VERSION: u32 = 1;
 
     /// Size of the `unknown1` field in bytes — fixed by the SPC format.
     const UNKNOWN1_LEN: usize = 0x24;
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub(crate) struct SpcManifestJson {
+    pub struct SpcManifestJson {
         pub version: u32,
         /// Hex-encoded 36 bytes from SPC header offset `0x04`.
         pub unknown1: String,
@@ -1036,7 +928,7 @@ pub(crate) mod spc_manifest {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    pub(crate) struct SpcEntryJson {
+    pub struct SpcEntryJson {
         /// Entry name, UTF-8. DR V3 ships ASCII-only names; non-UTF-8
         /// names are rejected at extract time.
         pub name: String,
@@ -1049,7 +941,7 @@ pub(crate) mod spc_manifest {
 
     #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
     #[serde(rename_all = "lowercase")]
-    pub(crate) enum SpcCompressionJson {
+    pub enum SpcCompressionJson {
         Stored,
         Lzss,
     }
@@ -1103,7 +995,7 @@ pub(crate) mod spc_manifest {
         /// `unknown1` does not decode to exactly 36 bytes,
         /// `entries.len()` differs from `entry_bodies.len()`, or any
         /// entry's UTF-8 name fails the round-trip.
-        pub(crate) fn into_spc(self, entry_bodies: Vec<Vec<u8>>) -> anyhow::Result<Spc> {
+        pub fn into_spc(self, entry_bodies: Vec<Vec<u8>>) -> anyhow::Result<Spc> {
             if self.version != MANIFEST_VERSION {
                 anyhow::bail!(
                     "manifest schema version {} is not supported (this build expects {})",

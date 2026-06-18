@@ -33,8 +33,8 @@ version other than the one above.
 The authoritative source of truth for every field is the corresponding
 DTO module:
 
-- Manifests and format sidecars: [`crates/drv3-cli/src/dto.rs`](../crates/drv3-cli/src/dto.rs).
-- Translation patches: [`crates/drv3-translate-cli/src/dto.rs`](../crates/drv3-translate-cli/src/dto.rs).
+- Manifests and format sidecars: [`crates/drv3-dto/src/lib.rs`](../crates/drv3-dto/src/lib.rs).
+- Translation patches: [`crates/drv3-dto/src/patch.rs`](../crates/drv3-dto/src/patch.rs).
 
 ---
 
@@ -172,7 +172,6 @@ bodies; `cpk pack` reads it back.
 {
   "version": 1,
   "header": {
-    "name": "CpkHeader",
     "columns": [
       { "name": "UpdateDateTime", "storage": "PerRow", "type": "u64" },
       { "name": "Align",          "storage": "PerRow", "type": "u16" },
@@ -440,7 +439,7 @@ library's `DriftPolicy`:
 
 ### Validation rules
 
-Loaded by [`merge_docs`](../crates/drv3-translate-cli/src/dto.rs):
+Loaded by [`merge_docs`](../crates/drv3-dto/src/patch.rs):
 
 - **Duplicate slot**: the same `(cpk, cpk_path, spc_member, table, index)` 5-tuple appearing more than once *across all loaded JSONs* is rejected. Guards against accidentally combining translations that disagree.
 - **Duplicate codepoint**: the same `codepoint` appearing more than once within a single font group is rejected.

@@ -1,7 +1,5 @@
 //! `drv3` — command-line tool for reading and writing Danganronpa V3 game data.
 
-mod dto;
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -125,7 +123,7 @@ fn main() -> Result<()> {
     reason = "top-level CLI dispatcher for one subcommand family"
 )]
 fn cpk(cmd: CpkCmd) -> Result<()> {
-    use dto::cpk_manifest::{
+    use drv3_dto::cpk_manifest::{
         CpkManifestJson, ETOC_SIDECAR, GTOC_SIDECAR, ITOC_SIDECAR, MANIFEST_FILENAME,
     };
 
@@ -182,7 +180,7 @@ fn cpk(cmd: CpkCmd) -> Result<()> {
             }
 
             // Manifest.
-            let manifest = dto::cpk_manifest::CpkManifestJson::from(&parsed);
+            let manifest = drv3_dto::cpk_manifest::CpkManifestJson::from(&parsed);
             let manifest_path = out_dir.join(MANIFEST_FILENAME);
             fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
                 .with_context(|| format!("writing {}", manifest_path.display()))?;
@@ -220,7 +218,7 @@ fn cpk(cmd: CpkCmd) -> Result<()> {
                 .with_context(|| format!("parsing {}", manifest_path.display()))?;
 
             // Load every file body referenced by the manifest, in order.
-            let mut file_bodies: Vec<(dto::cpk_manifest::CpkFileJson, Vec<u8>)> =
+            let mut file_bodies: Vec<(drv3_dto::cpk_manifest::CpkFileJson, Vec<u8>)> =
                 Vec::with_capacity(manifest.files.len());
             for entry in &manifest.files {
                 let body_path = in_dir.join(&entry.path);
@@ -265,7 +263,7 @@ fn cpk(cmd: CpkCmd) -> Result<()> {
 }
 
 fn spc(cmd: SpcCmd) -> Result<()> {
-    use dto::spc_manifest::{MANIFEST_FILENAME, SpcManifestJson};
+    use drv3_dto::spc_manifest::{MANIFEST_FILENAME, SpcManifestJson};
 
     match cmd {
         SpcCmd::List { archive } => {
@@ -337,13 +335,13 @@ fn stx(cmd: StxCmd) -> Result<()> {
         StxCmd::Dump { stx, out_json } => {
             let bytes = read_file(&stx)?;
             let parsed = drv3_stx::Stx::parse(&bytes)?;
-            let json: dto::stx::StxJson = (&parsed).into();
+            let json: drv3_dto::stx::StxJson = (&parsed).into();
             fs::write(&out_json, serde_json::to_string_pretty(&json)?)?;
             Ok(())
         }
         StxCmd::Build { json, out_stx } => {
             let raw = fs::read_to_string(&json)?;
-            let dto: dto::stx::StxJson = serde_json::from_str(&raw)?;
+            let dto: drv3_dto::stx::StxJson = serde_json::from_str(&raw)?;
             let stx: drv3_stx::Stx = dto.into();
             fs::write(&out_stx, stx.to_bytes())?;
             Ok(())
@@ -356,13 +354,13 @@ fn dat(cmd: DatCmd) -> Result<()> {
         DatCmd::Dump { dat, out_json } => {
             let bytes = read_file(&dat)?;
             let parsed = drv3_dat::Dat::parse(&bytes)?;
-            let json: dto::dat::DatJson = (&parsed).into();
+            let json: drv3_dto::dat::DatJson = (&parsed).into();
             fs::write(&out_json, serde_json::to_string_pretty(&json)?)?;
             Ok(())
         }
         DatCmd::Build { json, out_dat } => {
             let raw = fs::read_to_string(&json)?;
-            let dto: dto::dat::DatJson = serde_json::from_str(&raw)?;
+            let dto: drv3_dto::dat::DatJson = serde_json::from_str(&raw)?;
             let dat: drv3_dat::Dat = dto.try_into()?;
             fs::write(&out_dat, dat.to_bytes()?)?;
             Ok(())
@@ -375,13 +373,13 @@ fn wrd(cmd: WrdCmd) -> Result<()> {
         WrdCmd::Dump { wrd, out_json } => {
             let bytes = read_file(&wrd)?;
             let parsed = drv3_wrd::Wrd::parse(&bytes)?;
-            let json: dto::wrd::WrdJson = (&parsed).into();
+            let json: drv3_dto::wrd::WrdJson = (&parsed).into();
             fs::write(&out_json, serde_json::to_string_pretty(&json)?)?;
             Ok(())
         }
         WrdCmd::Build { json, out_wrd } => {
             let raw = fs::read_to_string(&json)?;
-            let dto: dto::wrd::WrdJson = serde_json::from_str(&raw)?;
+            let dto: drv3_dto::wrd::WrdJson = serde_json::from_str(&raw)?;
             let wrd: drv3_wrd::Wrd = dto.into();
             fs::write(&out_wrd, wrd.to_bytes()?)?;
             Ok(())
@@ -468,13 +466,13 @@ fn spft(cmd: SpftCmd) -> Result<()> {
         SpftCmd::Dump { spft, out_json } => {
             let bytes = read_file(&spft)?;
             let parsed = drv3_spft::SpFt::parse(&bytes)?;
-            let json: dto::spft::SpFtJson = (&parsed).into();
+            let json: drv3_dto::spft::SpFtJson = (&parsed).into();
             fs::write(&out_json, serde_json::to_string_pretty(&json)?)?;
             Ok(())
         }
         SpftCmd::Build { json, out_spft } => {
             let raw = fs::read_to_string(&json)?;
-            let dto: dto::spft::SpFtJson = serde_json::from_str(&raw)?;
+            let dto: drv3_dto::spft::SpFtJson = serde_json::from_str(&raw)?;
             let spft: drv3_spft::SpFt = dto.into();
             fs::write(&out_spft, spft.to_bytes())?;
             Ok(())
@@ -556,7 +554,10 @@ fn read_file(path: &Path) -> Result<Vec<u8>> {
 /// drops the mapping promptly after parse, the contract is satisfied.
 fn mmap_file(path: &Path) -> Result<memmap2::Mmap> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    #[allow(unsafe_code)]
+    #[expect(
+        unsafe_code,
+        reason = "the crate's one unsafe site: memmap2::Mmap::map is unsafe — see the SAFETY note below"
+    )]
     // SAFETY: file is opened read-only and used only for the duration of this
     // call's caller; no concurrent writer is expected on a game-data CPK.
     let mmap = unsafe { memmap2::Mmap::map(&file) }

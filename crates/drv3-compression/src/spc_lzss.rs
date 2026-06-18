@@ -35,6 +35,9 @@ pub enum SpcError {
     #[error("unexpected end of compressed stream at byte {pos}")]
     UnexpectedEof { pos: usize },
 
+    #[error("back-reference out of range at byte {pos}")]
+    BadBackreference { pos: usize },
+
     #[error("decompressed {got} bytes but expected {expected}")]
     SizeMismatch { got: usize, expected: usize },
 }
@@ -103,10 +106,10 @@ pub fn decompress(input: &[u8], expected_size: usize) -> Result<Vec<u8>, SpcErro
                     .checked_add(offset)
                     .and_then(|s| s.checked_sub(SPC_WINDOW_MAX_SIZE))
                 else {
-                    return Err(SpcError::UnexpectedEof { pos });
+                    return Err(SpcError::BadBackreference { pos });
                 };
                 if src >= out.len() {
-                    return Err(SpcError::UnexpectedEof { pos });
+                    return Err(SpcError::BadBackreference { pos });
                 }
                 let byte = out[src];
                 out.push(byte);

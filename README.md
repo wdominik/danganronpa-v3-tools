@@ -1,6 +1,6 @@
 # Danganronpa V3 Tools
 
-A Rust toolkit — two CLI binaries plus ten library crates — for reading,
+A Rust toolkit — two CLI binaries plus eleven library crates — for reading,
 writing, and patching the game data files shipped with
 *Danganronpa V3: Killing Harmony*.
 
@@ -73,17 +73,18 @@ Each format has its own crate so you can pull in only what you need:
 | Crate | Purpose |
 |---|---|
 | `drv3-binio` | Bounded binary I/O primitives — endian-explicit `Reader` / `Writer`. Foundation, no DR V3-specific code. |
+| `drv3-cli` | The primary command-line interface — dump / build / extract / pack, with its JSON in `drv3-dto`. |
 | `drv3-compression` | SPC-LZSS codec; CRILAYLA header-recognition only. |
 | `drv3-cpk` | CRIWARE CPK archive reader/writer + the `@UTF` columnar primitive. |
-| `drv3-spc` | Spike-Chunsoft SPC inner archive. |
-| `drv3-stx` | STX string tables (the primary translation target). |
 | `drv3-dat` | Typed columnar data tables with two string pools (UTF-8, UTF-16 LE). |
-| `drv3-wrd` | Bytecode script container paired with STX dialogue files. |
-| `drv3-srd` | SRD block container (textures, fonts, vertex buffers, resource info). |
+| `drv3-dto` | serde DTOs + conversions for both JSON schemas — the dump/build/extract-pack exchange format and the translation patches. Keeps the libraries serde-free. |
+| `drv3-spc` | Spike-Chunsoft SPC inner archive. |
 | `drv3-spft` | `SpFt` font metadata block found inside SRD resources. |
-| `drv3-translate` | Translation patch engine — applies STX text and font glyph patches to parsed CPKs in memory. Serde-free; the CLI front-end owns the JSON schema. |
-| `drv3-cli` | The primary command-line interface — owns the dump/build JSON-exchange DTOs. |
-| `drv3-translate-cli` | CLI front-end for the translation pipeline (`apply` / `validate`) — owns the patch-JSON schema. |
+| `drv3-srd` | SRD block container (textures, fonts, vertex buffers, resource info). |
+| `drv3-stx` | STX string tables (the primary translation target). |
+| `drv3-translate` | Translation patch engine — applies STX text and font glyph patches to parsed CPKs in memory. Serde-free; the JSON schema lives in `drv3-dto`. |
+| `drv3-translate-cli` | CLI front-end for the translation pipeline (`apply` / `validate`) — consumes patch JSON via `drv3-dto`. |
+| `drv3-wrd` | Bytecode script container paired with STX dialogue files. |
 
 Format-leaf crates (`drv3-stx`, `drv3-dat`, `drv3-wrd`, `drv3-srd`,
 `drv3-spft`) depend only on `drv3-binio` (plus the small `bitflags` crate
@@ -158,7 +159,7 @@ bytes diverge.
 ## Library usage
 
 The CLI is one consumer of the libraries; the same surface is available
-to any Rust program. Two short examples:
+to any Rust program. A few short examples:
 
 ### Walk a CPK from your own code
 
@@ -198,6 +199,37 @@ for entry in &mut stx.tables[0].entries {
     }
 }
 std::fs::write("dialogue.stx", stx.to_bytes())?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+### Find and edit a dialogue line inside a CPK
+
+The formats nest CPK → SPC → STX. The lookup helpers (`Cpk::file`, `Spc::entry`,
+`StxTable::entry`, plus their `*_mut` variants) make drilling in and editing a
+single line concise:
+
+```rust
+use std::borrow::Cow;
+use drv3_cpk::Cpk;
+use drv3_spc::Spc;
+use drv3_stx::Stx;
+
+let bytes = std::fs::read("partition_data_win_us.cpk")?;
+let mut cpk = Cpk::parse(&bytes)?;
+
+if let Some(file) = cpk.file_mut("wrd_script/003", "chap0_text_US.SPC") {
+    let mut spc = Spc::parse(&file.data)?;
+    if let Some(member) = spc.entry_mut("c00_001_018.stx") {
+        let mut stx = Stx::parse(&member.data)?;
+        if let Some(entry) = stx.tables[0].entry_mut(0) {
+            entry.text = "Drücke eine Taste".into();
+        }
+        member.data = stx.to_bytes();           // STX bytes back into the SPC member
+    }
+    file.data = Cow::Owned(spc.to_bytes()?);    // SPC bytes back into the CPK file
+}
+
+std::fs::write("patched.cpk", cpk.to_bytes()?)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -263,17 +295,18 @@ cargo test -p drv3-cpk -- --ignored
 .
 ├── crates/                    every Rust crate lives here
 │   ├── drv3-binio/            foundation
+│   ├── drv3-cli/              CLI binary (drv3-cli)
 │   ├── drv3-compression/      CRILAYLA + SPC-LZSS
 │   ├── drv3-cpk/              CPK archive + @UTF table
-│   ├── drv3-spc/              SPC inner archive
-│   ├── drv3-stx/              STX string tables
 │   ├── drv3-dat/              DAT typed tables
-│   ├── drv3-wrd/              WRD bytecode scripts
-│   ├── drv3-srd/              SRD block container
+│   ├── drv3-dto/              JSON DTOs + conversions for both CLIs
+│   ├── drv3-spc/              SPC inner archive
 │   ├── drv3-spft/             SpFt font metadata
+│   ├── drv3-srd/              SRD block container
+│   ├── drv3-stx/              STX string tables
 │   ├── drv3-translate/        translation patch engine
 │   ├── drv3-translate-cli/    CLI binary, front-end for drv3-translate
-│   └── drv3-cli/              CLI binary (drv3-cli)
+│   └── drv3-wrd/              WRD bytecode scripts
 ├── docs/
 │   ├── binary-formats.md      reverse-engineering reference for DR V3 on-disk bytes
 │   └── json-schemas.md        JSON sidecar + translation-patch schemas

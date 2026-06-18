@@ -10,6 +10,7 @@ description = "CRILAYLA and Spike-Chunsoft LZSS codecs used by Danganronpa V3"
 
 [dependencies]
 drv3-binio = { workspace = true }
+
 thiserror = { workspace = true }
 
 [lints]

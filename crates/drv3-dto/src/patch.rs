@@ -11,11 +11,11 @@ use drv3_translate::{
 };
 use serde::Deserialize;
 
-pub(crate) const EXPECTED_SCHEMA: &str = "drv3-translate/v1";
+pub const EXPECTED_SCHEMA: &str = "drv3-translate/v1";
 
 /// Top-level JSON document.
 #[derive(Debug, Deserialize)]
-pub(crate) struct TranslationDocJson {
+pub struct TranslationDocJson {
     pub schema: String,
     #[serde(default)]
     pub source_language: String,
@@ -24,10 +24,8 @@ pub(crate) struct TranslationDocJson {
     // Accepted-and-ignored: kept in the schema for translator audit trails
     // but the patcher has no use for either.
     #[serde(default)]
-    #[expect(dead_code, reason = "schema field; parsed for forward-compat")]
     pub created_at: Option<String>,
     #[serde(default)]
-    #[expect(dead_code, reason = "schema field; parsed for forward-compat")]
     pub title: Option<String>,
     pub files: Vec<FileGroupJson>,
 }
@@ -37,13 +35,13 @@ pub(crate) struct TranslationDocJson {
 /// alongside its own fields in the same object.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "format", rename_all = "lowercase")]
-pub(crate) enum FileGroupJson {
+pub enum FileGroupJson {
     Stx(StxFileGroupJson),
     Font(FontFileGroupJson),
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct StxFileGroupJson {
+pub struct StxFileGroupJson {
     pub cpk: String,
     pub cpk_path: String,
     pub spc_member: String,
@@ -51,7 +49,7 @@ pub(crate) struct StxFileGroupJson {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct EntryJson {
+pub struct EntryJson {
     pub table: u32,
     pub index: u32,
     pub source: String,
@@ -60,12 +58,11 @@ pub(crate) struct EntryJson {
     // translator metadata that the patch engine has no use for. Deserialize
     // it via the catch-all so unknown context shapes don't break parsing.
     #[serde(default)]
-    #[expect(dead_code, reason = "translator metadata; ignored by patcher")]
     pub context: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct FontFileGroupJson {
+pub struct FontFileGroupJson {
     pub cpk: String,
     pub cpk_path: String,
     pub spc_member: String,
@@ -79,7 +76,7 @@ pub(crate) struct FontFileGroupJson {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct AtlasJson {
+pub struct AtlasJson {
     pub width: u16,
     pub height: u16,
     /// Pixel format of the *existing* atlas being patched: `"BC4"` (the
@@ -89,86 +86,11 @@ pub(crate) struct AtlasJson {
     pub format: String,
 }
 
-/// Generate a map-only [`Deserialize`] for a fixed-shape struct: it accepts a
-/// JSON object carrying the named fields and rejects every other shape —
-/// notably a JSON array, so the legacy positional form (`[x, y]`) errors
-/// instead of silently mapping onto the fields in declaration order.
-macro_rules! object_only {
-    ($t:ident, $expecting:literal, { $($f:ident : $ty:ty),+ $(,)? }) => {
-        impl<'de> serde::Deserialize<'de> for $t {
-            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                struct FieldVisitor;
-                impl<'de> serde::de::Visitor<'de> for FieldVisitor {
-                    type Value = $t;
-                    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                        f.write_str($expecting)
-                    }
-                    fn visit_map<M: serde::de::MapAccess<'de>>(
-                        self,
-                        mut map: M,
-                    ) -> Result<$t, M::Error> {
-                        $(let mut $f: Option<$ty> = None;)+
-                        while let Some(key) = map.next_key::<String>()? {
-                            match key.as_str() {
-                                $(stringify!($f) => {
-                                    if $f.is_some() {
-                                        return Err(serde::de::Error::duplicate_field(stringify!($f)));
-                                    }
-                                    $f = Some(map.next_value()?);
-                                })+
-                                other => {
-                                    return Err(serde::de::Error::unknown_field(
-                                        other,
-                                        &[$(stringify!($f)),+],
-                                    ));
-                                }
-                            }
-                        }
-                        Ok($t {
-                            $($f: $f
-                                .ok_or_else(|| serde::de::Error::missing_field(stringify!($f)))?,)+
-                        })
-                    }
-                }
-                deserializer.deserialize_map(FieldVisitor)
-            }
-        }
-    };
-}
-
-/// Top-left atlas coordinate of a glyph, in pixels (12-bit each).
-#[derive(Debug)]
-pub(crate) struct PositionJson {
-    pub x: u16,
-    pub y: u16,
-}
-object_only!(PositionJson, "a glyph position object with `x` and `y`", { x: u16, y: u16 });
-
-/// Glyph bounding-box dimensions, in pixels.
-#[derive(Debug)]
-pub(crate) struct SizeJson {
-    pub width: u8,
-    pub height: u8,
-}
-object_only!(SizeJson, "a glyph size object with `width` and `height`", { width: u8, height: u8 });
-
-/// Per-glyph spacing deltas, in signed pixels: `left`/`right` are the
-/// horizontal side bearings, `vertical` shifts the glyph up/down.
-#[derive(Debug)]
-pub(crate) struct KerningJson {
-    pub left: i8,
-    pub right: i8,
-    pub vertical: i8,
-}
-object_only!(
-    KerningJson,
-    "a glyph kerning object with `left`, `right`, and `vertical`",
-    { left: i8, right: i8, vertical: i8 }
-);
+use crate::glyph::{KerningJson, PositionJson, SizeJson};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FontGlyphJson {
+pub struct FontGlyphJson {
     pub codepoint: u32,
     /// Optional human-readable mirror of `codepoint`. When both are
     /// present the loader validates they agree.
@@ -194,7 +116,7 @@ pub(crate) struct FontGlyphJson {
 ///
 /// Returns an error if the file can't be read, isn't valid JSON, or the
 /// `schema` field doesn't match [`EXPECTED_SCHEMA`].
-pub(crate) fn load_doc(path: &Path) -> Result<(TranslationDocJson, PathBuf)> {
+pub fn load_doc(path: &Path) -> Result<(TranslationDocJson, PathBuf)> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let doc: TranslationDocJson =
         serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
@@ -224,7 +146,7 @@ pub(crate) fn load_doc(path: &Path) -> Result<(TranslationDocJson, PathBuf)> {
 /// STX slot is referenced twice across all input docs, any font glyph
 /// codepoint is referenced twice within one font group, any
 /// `char`/`codepoint` pair disagrees, or any glyph's PNG can't be read.
-pub(crate) fn merge_docs(docs: Vec<(TranslationDocJson, PathBuf)>) -> Result<TranslationSet> {
+pub fn merge_docs(docs: Vec<(TranslationDocJson, PathBuf)>) -> Result<TranslationSet> {
     let mut set = TranslationSet::default();
     let mut stx_seen: std::collections::HashSet<(String, String, String, u32, u32)> =
         std::collections::HashSet::new();
@@ -376,12 +298,10 @@ fn convert_font_group(fg: FontFileGroupJson, base: &Path, set: &mut TranslationS
 
 /// Decode a glyph PNG into a single-channel alpha8 buffer.
 ///
-/// Source channel: PNGs with an alpha channel contribute via alpha;
-/// fully-opaque grayscale PNGs contribute via luminance (treating "black
-/// ink on white background" as inverted, since the DR V3 atlas
-/// convention is "background = 0, ink = 255"). The producer's typical
-/// output (RGBA with transparent background + opaque ink) just maps the
-/// alpha channel through unchanged.
+/// Alpha channel only — provide RGBA with a transparent background. The DR V3
+/// atlas convention is "background = 0, ink = 255", which a transparent-
+/// background, opaque-ink glyph maps to directly: the alpha channel passes
+/// through unchanged.
 fn load_glyph_png_as_alpha8(
     path: &Path,
     declared_size: Option<(u8, u8)>,

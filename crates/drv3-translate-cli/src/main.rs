@@ -6,7 +6,6 @@
 
 mod cmd_apply;
 mod cmd_validate;
-mod dto;
 
 use std::path::{Path, PathBuf};
 
@@ -121,7 +120,10 @@ fn main() -> Result<()> {
 /// Returns an error if the file can't be opened or the mapping fails.
 pub(crate) fn mmap_file(path: &Path) -> Result<memmap2::Mmap> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    #[allow(unsafe_code)]
+    #[expect(
+        unsafe_code,
+        reason = "the crate's one unsafe site: memmap2::Mmap::map is unsafe — see the SAFETY note below"
+    )]
     // SAFETY: file is opened read-only and used only for the duration of
     // this call's caller; no concurrent writer is expected on a game-data
     // CPK that we're patching from.

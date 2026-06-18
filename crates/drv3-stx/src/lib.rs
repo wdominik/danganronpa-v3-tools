@@ -28,12 +28,15 @@
 //! ```no_run
 //! use drv3_stx::Stx;
 //! let bytes = std::fs::read("dialogue.stx").unwrap();
-//! let stx = Stx::parse(&bytes).unwrap();
+//! let mut stx = Stx::parse(&bytes).unwrap();
 //! for entry in &stx.tables[0].entries {
 //!     println!("{}: {}", entry.id, entry.text);
 //! }
-//! let out = stx.to_bytes();
-//! std::fs::write("dialogue.stx", out).unwrap();
+//! // Edit one line by its id, then write the file back.
+//! if let Some(entry) = stx.tables[0].entry_mut(1) {
+//!     entry.text = "Neuer Text".to_string();
+//! }
+//! std::fs::write("dialogue.stx", stx.to_bytes()).unwrap();
 //! ```
 
 use std::collections::HashMap;
@@ -67,6 +70,18 @@ pub struct StxEntry {
     pub text: String,
 }
 
+impl StxTable {
+    /// Find an entry by its [`StxEntry::id`], or `None` if absent.
+    pub fn entry(&self, id: u32) -> Option<&StxEntry> {
+        self.entries.iter().find(|e| e.id == id)
+    }
+
+    /// Mutable counterpart to [`StxTable::entry`] — for editing the text in place.
+    pub fn entry_mut(&mut self, id: u32) -> Option<&mut StxEntry> {
+        self.entries.iter_mut().find(|e| e.id == id)
+    }
+}
+
 impl Stx {
     /// Parse an STX file from a byte buffer.
     ///
@@ -84,12 +99,17 @@ impl Stx {
         let table_count = r.u32_le()? as usize;
         let table_offset = r.u32_le()? as usize;
 
-        // Table-info section, starting at offset 0x10.
+        // Table-info section, starting at offset 0x10. Record each table's
+        // declared string count explicitly — recovering it later from
+        // `Vec::capacity()` would lean on an allocation hint that is only
+        // guaranteed to be >= the requested value, not exactly equal.
         let mut tables: Vec<StxTable> = Vec::with_capacity(table_count);
+        let mut counts: Vec<usize> = Vec::with_capacity(table_count);
         for _ in 0..table_count {
             let unknown = r.u32_le()?;
             let string_count = r.u32_le()? as usize;
             r.skip(8)?; // padding
+            counts.push(string_count);
             tables.push(StxTable {
                 unknown,
                 entries: Vec::with_capacity(string_count),
@@ -98,7 +118,6 @@ impl Stx {
 
         // Index array — one big concatenated array, table 0 first.
         r.seek(table_offset)?;
-        let counts: Vec<usize> = tables.iter().map(|t| t.entries.capacity()).collect();
         for (table_idx, &string_count) in counts.iter().enumerate() {
             for _ in 0..string_count {
                 let id = r.u32_le()?;
@@ -160,13 +179,8 @@ impl Stx {
         let mut slot_patches: Vec<(u32, drv3_binio::Patch)> = Vec::with_capacity(total_entries);
         for table in &self.tables {
             for entry in &table.entries {
-                let pair_pos = w.position();
                 w.write_u32_le(entry.id);
-                let offset_patch = drv3_binio::Patch {
-                    pos: pair_pos + 4,
-                    len: 4,
-                };
-                w.write_fill(4, 0); // placeholder offset slot
+                let offset_patch = w.reserve_u32_le();
                 slot_patches.push((entry.id, offset_patch));
             }
         }
@@ -223,6 +237,14 @@ mod tests {
                 ],
             }],
         }
+    }
+
+    #[test]
+    fn entry_lookup_by_id() {
+        let stx = sample();
+        let table = &stx.tables[0];
+        assert_eq!(table.entry(2).unwrap().text, "Goodbye.");
+        assert!(table.entry(12_345).is_none());
     }
 
     #[test]

@@ -11,6 +11,7 @@ description = "Danganronpa V3 SPC archive reader/writer"
 [dependencies]
 drv3-binio = { workspace = true }
 drv3-compression = { workspace = true }
+
 thiserror = { workspace = true }
 
 [lints]

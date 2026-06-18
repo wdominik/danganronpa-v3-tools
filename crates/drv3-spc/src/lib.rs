@@ -99,6 +99,18 @@ impl SpcEntry {
 }
 
 impl Spc {
+    /// Find a subfile by name (UTF-8 / ASCII), or `None` if absent.
+    pub fn entry(&self, name: &str) -> Option<&SpcEntry> {
+        self.entries.iter().find(|e| e.name_as_str() == Some(name))
+    }
+
+    /// Mutable counterpart to [`Spc::entry`] — for editing a member's bytes in place.
+    pub fn entry_mut(&mut self, name: &str) -> Option<&mut SpcEntry> {
+        self.entries
+            .iter_mut()
+            .find(|e| e.name_as_str() == Some(name))
+    }
+
     /// Parse an SPC archive from a byte buffer.
     ///
     /// # Errors
@@ -107,6 +119,25 @@ impl Spc {
     /// [`SpcParseError::CmpVariant`] for the unsupported `$CMP` form),
     /// the `Root` marker is missing, an entry's compression flag is
     /// neither stored nor LZSS, or LZSS decompression of any entry fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use drv3_spc::Spc;
+    ///
+    /// let bytes = std::fs::read("chap0_text_US.SPC")?;
+    /// let spc = Spc::parse(&bytes)?;
+    ///
+    /// for entry in &spc.entries {
+    ///     println!("{} ({} bytes)", entry.name_as_str().unwrap_or("?"), entry.data.len());
+    /// }
+    ///
+    /// // A member's `data` is raw bytes — hand an `.stx` member to `drv3_stx::Stx::parse`.
+    /// if let Some(member) = spc.entry("c00_001_018.stx") {
+    ///     let _stx_bytes = &member.data;
+    /// }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn parse(input: &[u8]) -> SpcResult<Self> {
         let mut r = Reader::new(input);
         let magic: [u8; 4] = r.array()?;
@@ -269,6 +300,16 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn entry_lookup_by_name() {
+        let spc = sample();
+        assert_eq!(
+            spc.entry("chapter1.wrd").unwrap().compression_flag,
+            COMPRESSION_LZSS
+        );
+        assert!(spc.entry("missing.stx").is_none());
     }
 
     #[test]

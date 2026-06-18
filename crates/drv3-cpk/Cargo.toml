@@ -11,8 +11,9 @@ description = "CRIWARE CPK archive reader/writer (used by Danganronpa V3)"
 [dependencies]
 drv3-binio = { workspace = true }
 drv3-compression = { workspace = true }
-thiserror = { workspace = true }
+
 indexmap = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

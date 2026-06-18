@@ -49,7 +49,7 @@ fn synth_spc(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
     spc.to_bytes().unwrap()
 }
 
-fn synth_cpk(files: Vec<(&str, &str, Vec<u8>)>) -> Cpk {
+fn synth_cpk(files: Vec<(&str, &str, Vec<u8>)>) -> Cpk<'static> {
     Cpk {
         header_row: UtfRow::default(),
         header_columns: Vec::new(),
@@ -63,7 +63,7 @@ fn synth_cpk(files: Vec<(&str, &str, Vec<u8>)>) -> Cpk {
                 id: i as u32,
                 user_string: String::new(),
                 extra: IndexMap::new(),
-                data,
+                data: data.into(),
             })
             .collect(),
         etoc_packet: None,
@@ -234,13 +234,12 @@ fn parallel_dispatch_produces_same_results_as_sequential() {
         .enumerate()
         .map(|(i, s)| synth_spc(&[(&format!("m{i}.stx"), s.clone())]))
         .collect();
+    // Own the formatted scene names so `files` can borrow them — no leaking.
+    let names: Vec<String> = (0..6).map(|i| format!("scene{i}.spc")).collect();
     let files: Vec<(&str, &str, Vec<u8>)> = spcs
         .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let name = Box::leak(format!("scene{i}.spc").into_boxed_str()) as &str;
-            ("dir", name, s.clone())
-        })
+        .zip(&names)
+        .map(|(s, name)| ("dir", name.as_str(), s.clone()))
         .collect();
 
     let make_set = || TranslationSet {

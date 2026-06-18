@@ -1,5 +1,7 @@
 //! CPK archive reader/writer built on top of [`crate::utf::UtfTable`].
 
+use std::borrow::Cow;
+
 use drv3_binio::{BinError, BinResult, Reader};
 use drv3_compression::crilayla;
 use indexmap::IndexMap;
@@ -32,8 +34,15 @@ pub enum CpkParseError {
 pub type CpkResult<T> = Result<T, CpkParseError>;
 
 /// Parsed CPK archive.
+///
+/// File bodies are borrowed from the input buffer: [`Cpk::parse`] stores each
+/// [`CpkFile::data`] as `Cow::Borrowed` into the parsed slice (zero-copy, so
+/// `cpk list` / `extract` don't materialize gigabytes of bodies), while
+/// mutators such as the translation engine replace individual bodies with
+/// `Cow::Owned`. The lifetime `'a` is the input buffer's; a `Cpk` assembled
+/// from owned data (a manifest, a test) is `Cpk<'static>`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Cpk {
+pub struct Cpk<'a> {
     /// All columns from the single-row header `@UTF` table, preserved so a
     /// writer can re-emit verbatim metadata (timestamps, tool versions, etc.).
     pub header_row: UtfRow,
@@ -45,7 +54,7 @@ pub struct Cpk {
     /// TOC carries a `Constant` column or a `u64 FileSize`.
     pub toc_columns: Vec<UtfColumn>,
     /// Files in TOC order.
-    pub files: Vec<CpkFile>,
+    pub files: Vec<CpkFile<'a>>,
     /// Raw bytes of the ETOC packet (wrapper included), if present.
     pub etoc_packet: Option<Vec<u8>>,
     /// Raw bytes of the ITOC packet (wrapper included), if present.
@@ -54,7 +63,7 @@ pub struct Cpk {
     pub gtoc_packet: Option<Vec<u8>>,
 }
 
-impl Cpk {
+impl Cpk<'_> {
     /// Canonical DR V3 TOC schema: seven `PerRow` columns describing each
     /// file in the archive — `DirName`, `FileName`, `FileSize`,
     /// `ExtractSize`, `FileOffset`, `ID`, `UserString`. Useful when
@@ -84,17 +93,33 @@ impl Cpk {
 
 /// One file entry in the TOC.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CpkFile {
+pub struct CpkFile<'a> {
     pub dir_name: String,
     pub file_name: String,
     pub id: u32,
     pub user_string: String,
     /// All other TOC columns preserved verbatim (per-row values keyed by column name).
     pub extra: IndexMap<String, UtfValue>,
-    pub data: Vec<u8>,
+    /// File body — `Cow::Borrowed` into the parsed buffer after [`Cpk::parse`],
+    /// `Cow::Owned` when assembled from owned bytes or replaced by a mutator.
+    pub data: Cow<'a, [u8]>,
 }
 
-impl Cpk {
+impl<'a> Cpk<'a> {
+    /// Find a file by directory and filename, or `None` if absent.
+    pub fn file(&self, dir_name: &str, file_name: &str) -> Option<&CpkFile<'a>> {
+        self.files
+            .iter()
+            .find(|f| f.dir_name == dir_name && f.file_name == file_name)
+    }
+
+    /// Mutable counterpart to [`Cpk::file`] — for editing a file's bytes in place.
+    pub fn file_mut(&mut self, dir_name: &str, file_name: &str) -> Option<&mut CpkFile<'a>> {
+        self.files
+            .iter_mut()
+            .find(|f| f.dir_name == dir_name && f.file_name == file_name)
+    }
+
     /// Parse a CPK archive from a byte buffer.
     ///
     /// # Errors
@@ -105,9 +130,35 @@ impl Cpk {
     /// `FileName`, `FileSize`, `FileOffset`) is missing, any file body's
     /// declared offset extends past the buffer, or any entry is
     /// CRILAYLA-compressed (not supported in v0.1).
-    pub fn parse(input: &[u8]) -> CpkResult<Self> {
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use drv3_cpk::Cpk;
+    ///
+    /// let bytes = std::fs::read("partition_data_win_us.cpk")?;
+    /// let mut cpk = Cpk::parse(&bytes)?;
+    ///
+    /// // List every file.
+    /// for file in &cpk.files {
+    ///     println!("{}/{} ({} bytes)", file.dir_name, file.file_name, file.data.len());
+    /// }
+    ///
+    /// // Find a file and replace its bytes in place (`Vec<u8>` -> `Cow` via `.into()`).
+    /// if let Some(file) = cpk.file_mut("", "some.dat") {
+    ///     file.data = b"new contents".to_vec().into();
+    /// }
+    ///
+    /// std::fs::write("patched.cpk", cpk.to_bytes()?)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the header / TOC / offset-base / per-file passes read as one linear parse"
+    )]
+    pub fn parse(input: &'a [u8]) -> CpkResult<Self> {
         let mut r = Reader::new(input);
-        let (header_table, _) = read_packet(&mut r, MAGIC_CPK)?;
+        let header_table = read_packet(&mut r, MAGIC_CPK)?;
         if header_table.rows.len() != 1 {
             return Err(BinError::malformed(
                 0,
@@ -158,7 +209,7 @@ impl Cpk {
 
         // TOC packet.
         r.seek(toc_offset as usize)?;
-        let (toc_table, _) = read_packet(&mut r, MAGIC_TOC)?;
+        let toc_table = read_packet(&mut r, MAGIC_TOC)?;
         let toc_columns = toc_table.columns.clone();
 
         // Pass-through optional packets.
@@ -236,7 +287,7 @@ impl Cpk {
             }
             let raw = &input[abs..end];
             let data = if file_size == extract_size {
-                raw.to_vec()
+                Cow::Borrowed(raw)
             } else if crilayla::is_crilayla(raw) {
                 return Err(CpkParseError::Crilayla(
                     crilayla::CrilaylaError::NotImplemented,
@@ -318,7 +369,7 @@ impl Cpk {
     /// don't match the size measured in the first pass (an internal
     /// inconsistency in the writer's planner).
     pub fn to_bytes(&self) -> CpkResult<Vec<u8>> {
-        let align = self.write_align()?;
+        let align = self.resolve_align()?;
         let pad_files = sorted_flag(&self.header_row) != 0;
 
         // Pass 1: placeholder build, only to measure packet sizes.
@@ -361,7 +412,7 @@ impl Cpk {
     }
 
     /// Read and validate the `Align` header field.
-    fn write_align(&self) -> CpkResult<u64> {
+    fn resolve_align(&self) -> CpkResult<u64> {
         let align = self
             .header_row
             .get("Align")
@@ -569,6 +620,10 @@ impl Cpk {
         })
     }
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "mirrors the fallible build_toc_table_with_layout so the two-pass writer treats header and TOC uniformly"
+    )]
     fn build_header_table(&self, layout: HeaderLayout) -> CpkResult<UtfTable> {
         // Start from preserved columns and substitute the layout-derived
         // fields. `Files` is recomputed from `self.files.len()` for safety.
@@ -677,7 +732,11 @@ fn slice_packet(input: &[u8], offset: u64, declared_size: u64) -> BinResult<Vec<
     Ok(input[start..end].to_vec())
 }
 
-fn read_packet(r: &mut Reader<'_>, expected_magic: &[u8; 4]) -> BinResult<(UtfTable, u64)> {
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "magic is borrowed to match the &[u8; 4] MAGIC_* constants passed at call sites"
+)]
+fn read_packet(r: &mut Reader<'_>, expected_magic: &[u8; 4]) -> BinResult<UtfTable> {
     r.expect_magic(expected_magic)?;
     let _flag = r.u32_le()?;
     let packet_size = r.u64_le()?;
@@ -685,9 +744,13 @@ fn read_packet(r: &mut Reader<'_>, expected_magic: &[u8; 4]) -> BinResult<(UtfTa
     let utf_end = utf_start + packet_size as usize;
     let table = UtfTable::parse(&r.buffer()[utf_start..utf_end])?;
     r.seek(utf_end)?;
-    Ok((table, packet_size))
+    Ok(table)
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "magic is borrowed to match the &[u8; 4] MAGIC_* constants passed at call sites"
+)]
 fn write_packet(out: &mut Vec<u8>, magic: &[u8; 4], utf_bytes: &[u8]) {
     out.extend_from_slice(magic);
     out.extend_from_slice(&0xFFu32.to_le_bytes());
@@ -727,7 +790,7 @@ fn required_u64(row: &UtfRow, name: &str, ctx: &'static str) -> CpkResult<u64> {
 fn toc_row_value(
     name: &str,
     col: &UtfColumn,
-    file: &CpkFile,
+    file: &CpkFile<'_>,
     file_offset: u64,
 ) -> CpkResult<UtfValue> {
     let size_value = |size: usize| -> CpkResult<UtfValue> {
@@ -855,9 +918,8 @@ fn pick_offset_base(
         BinError::malformed(
             0,
             format!(
-                "no offset base ({:#x} or {:#x}) keeps all TOC rows inside the content blob \
-                 ({:#x}..{:#x})",
-                toc_offset, content_offset, content_offset, file_len,
+                "no offset base ({toc_offset:#x} or {content_offset:#x}) keeps all TOC rows \
+                 inside the content blob ({content_offset:#x}..{file_len:#x})",
             ),
         )
         .into()
@@ -868,7 +930,11 @@ fn pick_offset_base(
 mod tests {
     use super::*;
 
-    fn sample_cpk() -> Cpk {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "test fixture enumerating a full 17-column CPK header schema"
+    )]
+    fn sample_cpk() -> Cpk<'static> {
         let mut header_row = UtfRow::new();
         // Seed required header columns. Pre-populate the four "layout-derived"
         // fields with placeholder zeros; the writer overrides them.
@@ -1012,7 +1078,7 @@ mod tests {
                     id: 1,
                     user_string: String::new(),
                     extra: IndexMap::new(),
-                    data: b"<<file1 contents>>".to_vec(),
+                    data: b"<<file1 contents>>".to_vec().into(),
                 },
                 CpkFile {
                     dir_name: "sub".into(),
@@ -1020,13 +1086,22 @@ mod tests {
                     id: 2,
                     user_string: "tag".into(),
                     extra: IndexMap::new(),
-                    data: vec![0x42; 137],
+                    data: vec![0x42; 137].into(),
                 },
             ],
             etoc_packet: None,
             itoc_packet: None,
             gtoc_packet: None,
         }
+    }
+
+    #[test]
+    fn file_lookup_by_dir_and_name() {
+        let cpk = sample_cpk();
+        assert_eq!(cpk.file("sub", "file2.wrd").unwrap().id, 2);
+        // Wrong directory must not match.
+        assert!(cpk.file("", "file2.wrd").is_none());
+        assert!(cpk.file("nope", "x").is_none());
     }
 
     #[test]
@@ -1082,7 +1157,7 @@ mod tests {
                     id: 0,
                     user_string: String::new(),
                     extra: IndexMap::new(),
-                    data: vec![0xAA; 137],
+                    data: vec![0xAA; 137].into(),
                 },
                 CpkFile {
                     dir_name: "sub".into(),
@@ -1090,7 +1165,7 @@ mod tests {
                     id: 1,
                     user_string: String::new(),
                     extra: IndexMap::new(),
-                    data: vec![0xBB; 5_000],
+                    data: vec![0xBB; 5_000].into(),
                 },
                 CpkFile {
                     dir_name: String::new(),
@@ -1098,7 +1173,7 @@ mod tests {
                     id: 2,
                     user_string: String::new(),
                     extra: IndexMap::new(),
-                    data: vec![0xCC; 1],
+                    data: vec![0xCC; 1].into(),
                 },
             ];
             c
@@ -1146,7 +1221,7 @@ mod tests {
         let toc_table = {
             let mut r = drv3_binio::Reader::new(&bytes);
             r.seek(toc_offset as usize).unwrap();
-            super::read_packet(&mut r, super::MAGIC_TOC).unwrap().0
+            super::read_packet(&mut r, super::MAGIC_TOC).unwrap()
         };
         for row in &toc_table.rows {
             let rel = row.get("FileOffset").and_then(UtfValue::as_u64).unwrap();
@@ -1176,7 +1251,7 @@ mod tests {
                 id: 0,
                 user_string: String::new(),
                 extra: IndexMap::new(),
-                data: vec![0xAA; 100],
+                data: vec![0xAA; 100].into(),
             },
             CpkFile {
                 dir_name: String::new(),
@@ -1184,7 +1259,7 @@ mod tests {
                 id: 1,
                 user_string: String::new(),
                 extra: IndexMap::new(),
-                data: vec![0xBB; 200],
+                data: vec![0xBB; 200].into(),
             },
         ];
 
@@ -1199,7 +1274,7 @@ mod tests {
         let toc_table = {
             let mut r = drv3_binio::Reader::new(&bytes);
             r.seek(toc_offset as usize).unwrap();
-            super::read_packet(&mut r, super::MAGIC_TOC).unwrap().0
+            super::read_packet(&mut r, super::MAGIC_TOC).unwrap()
         };
         let off0 = toc_table.rows[0]
             .get("FileOffset")
@@ -1403,22 +1478,67 @@ mod tests {
         assert_eq!(file_size_col.ty, UtfType::U64);
     }
 
+    /// A CRILAYLA-compressed entry must be rejected. The writer derives both
+    /// `FileSize` and `ExtractSize` from `data.len()`, so it never emits
+    /// `FileSize != ExtractSize` itself — such an entry only arrives from a
+    /// foreign packer. Forge one: rewrite the TOC so row 0's `ExtractSize`
+    /// differs from its `FileSize`, then stamp `CRILAYLA` magic over its body.
     #[test]
     fn rejects_crilayla_entries() {
-        // Construct a CPK then surgically inject CRILAYLA magic at one file's body.
-        let cpk = sample_cpk();
-        let mut bytes = cpk.to_bytes().unwrap();
+        let mut bytes = sample_cpk().to_bytes().unwrap();
         let parsed = Cpk::parse(&bytes).unwrap();
         let content_offset = parsed
             .header_row
             .get("ContentOffset")
-            .unwrap()
-            .as_u64()
+            .and_then(UtfValue::as_u64)
             .unwrap() as usize;
+        let toc_offset = parsed
+            .header_row
+            .get("TocOffset")
+            .and_then(UtfValue::as_u64)
+            .unwrap() as usize;
+
+        forge_extract_size_mismatch(&mut bytes, toc_offset);
         bytes[content_offset..content_offset + 8].copy_from_slice(b"CRILAYLA");
-        // Also bump ExtractSize ≠ FileSize for the first row — but easier: just
-        // confirm the unmodified read still works; cover the negative path by
-        // checking is_crilayla logic via the compression crate's test suite.
-        let _ = Cpk::parse(&bytes); // may now fail with various errors, but compilation succeeds
+
+        let err = Cpk::parse(&bytes).unwrap_err();
+        assert!(matches!(err, CpkParseError::Crilayla(_)));
+    }
+
+    /// The same `FileSize != ExtractSize` divergence with an ordinary
+    /// (non-CRILAYLA) body is a plain malformed error, not a CRILAYLA reject —
+    /// the two branches are distinct.
+    #[test]
+    fn size_mismatch_without_crilayla_magic_is_malformed() {
+        let mut bytes = sample_cpk().to_bytes().unwrap();
+        let toc_offset = Cpk::parse(&bytes)
+            .unwrap()
+            .header_row
+            .get("TocOffset")
+            .and_then(UtfValue::as_u64)
+            .unwrap() as usize;
+
+        forge_extract_size_mismatch(&mut bytes, toc_offset);
+
+        let err = Cpk::parse(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            CpkParseError::Bin(BinError::Malformed { .. })
+        ));
+    }
+
+    /// Rewrite the TOC packet in `bytes` so the first file row's `ExtractSize`
+    /// no longer equals its `FileSize`. Only a fixed-width cell value changes,
+    /// so the re-serialized TOC is the same length and the splice stays aligned.
+    fn forge_extract_size_mismatch(bytes: &mut [u8], toc_offset: usize) {
+        let new_toc = {
+            let mut r = Reader::new(bytes);
+            r.seek(toc_offset).unwrap();
+            let mut toc = read_packet(&mut r, MAGIC_TOC).unwrap();
+            toc.rows[0].insert("ExtractSize".into(), UtfValue::U32(0xDEAD));
+            toc.to_bytes().unwrap()
+        };
+        let toc_payload = toc_offset + PACKET_WRAPPER_SIZE as usize;
+        bytes[toc_payload..toc_payload + new_toc.len()].copy_from_slice(&new_toc);
     }
 }

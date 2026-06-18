@@ -20,10 +20,6 @@ impl<'a> Reader<'a> {
         self.pos
     }
 
-    pub fn len(&self) -> usize {
-        self.buf.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.pos >= self.buf.len()
     }
