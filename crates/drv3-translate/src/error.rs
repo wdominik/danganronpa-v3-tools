@@ -21,8 +21,8 @@ pub enum TranslateError {
         source: SpcParseError,
     },
 
-    /// Inner STX parse failed.
-    #[error("STX parse failed at {cpk_path}::{spc_member}: {source}")]
+    /// Inner STX parse or serialize failed.
+    #[error("STX read/write failed at {cpk_path}::{spc_member}: {source}")]
     Stx {
         cpk_path: String,
         spc_member: String,
@@ -33,6 +33,11 @@ pub enum TranslateError {
     /// Translation references a CPK that wasn't supplied to [`crate::apply`].
     #[error("no input CPK named {0} was supplied")]
     CpkNotFound(String),
+
+    /// The same CPK name was supplied to [`crate::apply`] more than once.
+    /// Duplicate names would double-apply the same file groups.
+    #[error("CPK named {0} was supplied more than once")]
+    DuplicateCpk(String),
 
     /// Drift detected and [`crate::DriftPolicy::Error`] is set.
     #[error(
@@ -58,7 +63,7 @@ pub enum TranslateError {
     },
 
     /// SPFT (font metadata) parse / serialize failure.
-    #[error("SPFT parse failed at {cpk_path}::{spc_member}: {source}")]
+    #[error("SPFT read/write failed at {cpk_path}::{spc_member}: {source}")]
     Spft {
         cpk_path: String,
         spc_member: String,

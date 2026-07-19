@@ -4,9 +4,11 @@ use thiserror::Error;
 
 /// Errors produced by `Reader` / `Writer` primitives.
 ///
-/// Format-specific crates wrap or re-export this. The error always carries the
-/// stream position so failures can be located in the source file without
-/// re-parsing.
+/// Format-specific crates wrap or re-export this. Most variants carry the
+/// stream position where the failure was detected, so failures can be located
+/// in the source file without re-parsing. Encode-time failures raised by a
+/// `Writer` (for example a count or offset that overflows its on-disk field)
+/// have no input stream and report position `0`.
 #[derive(Debug, Error)]
 pub enum BinError {
     #[error(

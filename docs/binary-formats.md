@@ -11,20 +11,20 @@ belong in separate documents.
 
 ---
 
-## Table of Contents
+## Table of contents
 
 1. [Overview](#1-overview)
-2. [Common Primitives & Conventions](#2-common-primitives--conventions)
-3. [CPK — Outer Archive](#3-cpk--outer-archive)
-4. [SPC — Inner Archive Container](#4-spc--inner-archive-container)
-5. [STX — String Table](#5-stx--string-table)
-6. [DAT — Typed Binary Tables](#6-dat--typed-binary-tables)
-7. [WRD — Script Files](#7-wrd--script-files)
-8. [SRD — Block Container](#8-srd--block-container)
+2. [Common primitives & conventions](#2-common-primitives--conventions)
+3. [CPK — outer archive](#3-cpk--outer-archive)
+4. [SPC — inner archive container](#4-spc--inner-archive-container)
+5. [STX — string table](#5-stx--string-table)
+6. [DAT — typed binary tables](#6-dat--typed-binary-tables)
+7. [WRD — script files](#7-wrd--script-files)
+8. [SRD — block container](#8-srd--block-container)
 9. [SpFt FontBlock](#9-spft-fontblock)
-10. [GPU Texture Formats](#10-gpu-texture-formats)
-11. [Cross-Format Notes](#11-cross-format-notes)
-12. [Out of Scope](#12-out-of-scope)
+10. [GPU texture formats](#10-gpu-texture-formats)
+11. [Cross-format notes](#11-cross-format-notes)
+12. [Out of scope](#12-out-of-scope)
 13. [References](#13-references)
 
 ---
@@ -34,7 +34,7 @@ belong in separate documents.
 The game ships its data inside a small number of large `.cpk` archive files. To
 reach an individual translatable string you must traverse a nest of containers:
 
-```
+```text
 .cpk  (CRIWARE archive — outer container)
  └─ .spc  (custom archive — inner container, usually compressed)
      ├─ .stx   (string tables — dialogue and menu text)
@@ -78,7 +78,7 @@ One other format appears inside the archives but is out of scope (see
 
 ---
 
-## 2. Common Primitives & Conventions
+## 2. Common primitives & conventions
 
 ### 2.1 Endianness map
 
@@ -129,7 +129,7 @@ Padding bytes are always `0x00`.
 
 When a section says "pad to N", compute:
 
-```
+```text
 pad_size = (N - (current_length % N)) % N
 ```
 
@@ -153,7 +153,7 @@ file in a CPK is the recommended way to validate a new implementation.
 
 ---
 
-## 3. CPK — Outer Archive
+## 3. CPK — outer archive
 
 CRIWARE Middleware archive format. Used across many Japanese games; not
 Danganronpa-specific.
@@ -177,7 +177,7 @@ the producing tool.
 A CPK file is a sequence of **packets**, each of which wraps a `@UTF` table
 (§3.4). At minimum:
 
-```
+```text
 +---------------------------+ offset 0
 | CPK packet                |  header — single-row @UTF table with global metadata
 +---------------------------+
@@ -271,7 +271,7 @@ The Flags byte splits as follows. It is **not** a clean high/low nibble — the
 storage selector lives in bits 5-6, with bit 4 acting as an independent
 "name-present" flag:
 
-```
+```text
 bits 0-3 : type nibble (UtfType)
 bit  4   : name-present flag    — 1 = a 4-byte name offset follows
 bits 5-6 : storage selector     — 00=None, 01=Constant, 10=PerRow, 11=Constant2
@@ -321,7 +321,7 @@ The type nibble (`Flags & 0x0F`):
 
 For each row (RowCount of them):
 
-```
+```text
 for each column whose storage flag is Per-row:
     read a value of the column's type, big-endian
 ```
@@ -421,7 +421,7 @@ blob, never inside the packet headers. As a sharper tie-breaker, the first row's
 A TOC row whose `FileSize != ExtractSize` indicates the file data is
 CRILAYLA-compressed. The compressed data begins with the magic:
 
-```
+```text
 Offset  Size  Field
 0x00    8     "CRILAYLA"  (ASCII)
 0x08    4     UncompressedSize  (u32 LE)
@@ -553,7 +553,7 @@ clean-room implementations.
 
 ---
 
-## 4. SPC — Inner Archive Container
+## 4. SPC — inner archive container
 
 A custom archive format used by Spike Chunsoft for Danganronpa games. Bundles
 together related game-data files (typically a chapter's STX/DAT/WRD) into a
@@ -610,13 +610,13 @@ Each subfile entry is variable-length but laid out predictably:
 
 Name padding:
 
-```
+```text
 P_n = (0x10 - (NameLength + 1) % 0x10) % 0x10
 ```
 
 Data padding:
 
-```
+```text
 P_d = (0x10 - CurrentSize % 0x10) % 0x10
 ```
 
@@ -679,7 +679,7 @@ one flag byte followed by 8 entries of 1–2 bytes each.
 **Stream layout.** The compressed bytes are a sequence of *blocks*. Each block
 is:
 
-```
+```text
 flag_byte (1 byte)
 8 entries (1–2 bytes each)
 ```
@@ -849,7 +849,7 @@ Both `name_padding` and `data_padding` are computed per the formulas in §4.3.
 
 ---
 
-## 5. STX — String Table
+## 5. STX — string table
 
 The primary translation target. Contains one or more tables, each mapping a
 numeric string ID to a UTF-16 LE string.
@@ -881,7 +881,7 @@ Total table-info section size: `0x10 * TableCount` bytes. For the typical case
 At absolute offset `TableOffset`, the per-table ID/offset arrays appear
 contiguously:
 
-```
+```text
 for each table t in 0..TableCount-1:
     for each entry e in 0..t.StringCount-1:
         StringId     (u32 LE)
@@ -1027,7 +1027,7 @@ byte sequence — there is no escape mechanism.
 
 ---
 
-## 6. DAT — Typed Binary Tables
+## 6. DAT — typed binary tables
 
 A row-and-column binary table. Many files inside the CPK that carry the `.dat`
 extension use this format for UI labels, item descriptions, character data,
@@ -1219,7 +1219,7 @@ for s in utf16_pool:
 
 ---
 
-## 7. WRD — Script Files
+## 7. WRD — script files
 
 A byte-code script that drives Danganronpa's dialogue scenes. Pairs with a
 same-named STX file: opcodes such as `LOC` reference STX string IDs, and
@@ -1249,7 +1249,7 @@ The byte-code stream starts at `0x20` and runs up to (but not including)
 
 ### 7.2 Section layout
 
-```
+```text
 +------------------+ 0x00
 | header (0x20)    |
 +------------------+ 0x20
@@ -1322,7 +1322,7 @@ UTF-16 LE null-terminated string list inside the WRD itself.
 
 Logic for distinguishing the cases:
 
-```
+```text
 if StringsPtr != 0:
     seek(StringsPtr)
     for i in 0..StringCount-1:
@@ -1431,7 +1431,7 @@ required.
 
 ---
 
-## 8. SRD — Block Container
+## 8. SRD — block container
 
 A typed-block container used for textures, font atlases, vertex buffers, and
 related resource metadata. Spike Chunsoft format, shared across Danganronpa
@@ -1477,7 +1477,7 @@ end-of-file.
 Each block may have **child blocks** (subdata). The standard hierarchy for a
 texture-bearing SRD is:
 
-```
+```text
 $CFH                         (always first; carries no payload)
 $TXR                         (texture metadata)
  ├─ $RSI                     (resource info — external data refs + ResourceData)
@@ -1506,7 +1506,7 @@ implementers commonly get it wrong on the first pass.
 
 After the 16-byte header:
 
-```
+```text
 data        : DataLength bytes      (block-type-specific payload)
 padding     : pad to next 0x10 boundary, zero bytes
 subdata     : SubdataLength bytes   (a recursive sequence of child blocks)
@@ -1551,7 +1551,7 @@ function read_srd(srd_path, srdi_path, srdv_path):
 The seven named block types are listed below. Carry-no-data blocks (`$CFH`,
 `$CT0`) emit a `DataLength` of 0 — they exist only as markers.
 
-#### 8.5.1 `$CFH` — Container File Header
+#### 8.5.1 `$CFH` — container file header
 
 - `DataLength` = 0.
 - `Unknown0C` = 1 (the only block type that uses this slot).
@@ -1566,7 +1566,7 @@ The seven named block types are listed below. Carry-no-data blocks (`$CFH`,
 - Appears at the end of the top-level block list, and at the end of `$TXR`
   children.
 
-#### 8.5.3 `$TXR` — Texture Metadata
+#### 8.5.3 `$TXR` — texture metadata
 
 Data payload (all little-endian):
 
@@ -1588,7 +1588,7 @@ The actual pixel data is **not** stored in the `$TXR` payload — it lives in
 the child `$RSI` block's external data (§8.5.4) and is referenced from the
 sidecar `.srdi` or `.srdv` file.
 
-#### 8.5.4 `$RSI` — Resource Info
+#### 8.5.4 `$RSI` — resource info
 
 Data payload (mixed widths, little-endian throughout):
 
@@ -1723,14 +1723,14 @@ The FontBlock is little-endian. The header is 44 bytes (0x2C):
 
 Starts at `BitFlagsPtr` (= `0x2C`). Size in bytes:
 
-```
+```text
 BitFlagsByteCount = ceil(BitFlagCount / 8)
 ```
 
 One bit per Unicode codepoint, packed with bit 0 (LSB) of each byte
 representing the first codepoint of that byte's 8-codepoint window:
 
-```
+```text
 bit_index_within_byte = codepoint & 0b111
 byte_within_table     = codepoint >> 3
 present  = (table[byte_within_table] >> bit_index_within_byte) & 1 == 1
@@ -1746,7 +1746,7 @@ Starts at `IndexTablePtr` (= `BitFlagsPtr + BitFlagsByteCount`).
 The index table is **sparse**: it has one u32 LE entry per 32-codepoint
 window of the bit-flag table. For a codepoint `c`, compute:
 
-```
+```text
 char_offset = (c / 8) & ~3        # round down to a multiple of 4 bytes
 glyph_index = read_u32_le(index_table + char_offset)
 ```
@@ -1778,7 +1778,7 @@ Kerning values are signed pixel deltas applied by the renderer.
 
 Two 12-bit unsigned integers `(x, y)` are packed into 3 bytes `(a, b, c)`:
 
-```
+```text
 # Pack (x, y) → (a, b, c)
 a = x & 0xFF                              # low 8 bits of x
 b = ((y & 0xF) << 4) | ((x >> 8) & 0xF)   # top 4 of x in low nibble, low 4 of y in high nibble
@@ -1952,7 +1952,7 @@ write_u32_le(font_name_ptrs_ptr)
 
 ---
 
-## 10. GPU Texture Formats
+## 10. GPU texture formats
 
 The `$TXR.Format` field (§8.5.3) is a single byte selecting one of the
 following pixel formats. A reader that opens a font texture must decode
@@ -2021,7 +2021,7 @@ When `Swizzle == 1` (the only value DR V3 fonts use), pixel data is
 linear top-to-bottom, left-to-right. For block-compressed formats,
 "rows" are rows of 4×4 pixel blocks; total byte size is:
 
-```
+```text
 blocks_w = ceil(DisplayWidth  / 4)
 blocks_h = ceil(DisplayHeight / 4)
 bytes    = blocks_w * blocks_h * bytes_per_block
@@ -2044,7 +2044,7 @@ and its size in `Values[1]`.
 
 ---
 
-## 11. Cross-Format Notes
+## 11. Cross-format notes
 
 ### 11.1 STX ↔ WRD pairing
 
@@ -2088,7 +2088,7 @@ part of the binary file format definitions.
 
 ---
 
-## 12. Out of Scope
+## 12. Out of scope
 
 The following formats and topics are intentionally excluded from this
 document:

@@ -17,6 +17,9 @@
 //!
 //! The atlas *pixel* data is not part of `SpFt`; it lives in the parent
 //! `$RSI`'s `ExternalData` and is referenced by the same indices.
+//!
+//! Fallible operations surface [`drv3_binio::BinResult`] directly; this crate
+//! defines no error type of its own.
 
 use drv3_binio::{BinError, BinResult, Reader, Writer};
 
@@ -92,7 +95,10 @@ impl SpFt {
         let bit_flags_byte_count = bit_flag_count.div_ceil(8) as usize;
         r.seek(bit_flags_ptr)?;
         let bit_flags = r.bytes(bit_flags_byte_count)?.to_vec();
-        let mut charset: Vec<u32> = Vec::with_capacity(glyph_count);
+        // The charset can hold at most one entry per set bit, so an oversized
+        // `glyph_count` can't force a larger pre-allocation than the flag table.
+        let charset_capacity = glyph_count.min(bit_flags.len().saturating_mul(8));
+        let mut charset: Vec<u32> = Vec::with_capacity(charset_capacity);
         'outer: for (byte_index, &b) in bit_flags.iter().enumerate() {
             if b == 0 {
                 continue;
@@ -131,7 +137,9 @@ impl SpFt {
 
         // BBox table — read all glyph_count entries, then assemble Glyphs.
         r.seek(bbox_table_ptr)?;
-        let mut bbox: Vec<Glyph> = Vec::with_capacity(glyph_count);
+        // Each bbox entry is 8 bytes on disk; cap the hint so a hostile
+        // `glyph_count` fails on a bounded read rather than a huge allocation.
+        let mut bbox: Vec<Glyph> = Vec::with_capacity(r.capacity_hint(glyph_count, 8));
         for _ in 0..glyph_count {
             let pa = r.u8()?;
             let pb = r.u8()?;
@@ -152,11 +160,22 @@ impl SpFt {
 
         let glyphs: Vec<Glyph> = glyph_index_for_cp
             .into_iter()
-            .map(|(codepoint, idx)| Glyph {
-                codepoint,
-                ..bbox[idx]
+            .map(|(codepoint, idx)| {
+                let glyph = bbox.get(idx).ok_or_else(|| {
+                    BinError::malformed(
+                        bbox_table_ptr,
+                        format!(
+                            "sparse index {idx} past bbox table ({} entries)",
+                            bbox.len()
+                        ),
+                    )
+                })?;
+                Ok(Glyph {
+                    codepoint,
+                    ..*glyph
+                })
             })
-            .collect();
+            .collect::<BinResult<Vec<Glyph>>>()?;
 
         // Font name.
         r.seek(font_name_ptr)?;
@@ -175,7 +194,14 @@ impl SpFt {
     ///
     /// Glyphs are written in ascending codepoint order. The function reorders
     /// `self.glyphs` only locally; the original struct is not mutated.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BinError::Malformed`] if the glyph count, font-name length,
+    /// or any section offset exceeds `u32::MAX` — each is stored as a 32-bit
+    /// little-endian header field, so a font that large cannot be represented
+    /// on disk.
+    pub fn to_bytes(&self) -> BinResult<Vec<u8>> {
         let mut glyphs = self.glyphs.clone();
         glyphs.sort_by_key(|g| g.codepoint);
 
@@ -211,20 +237,34 @@ impl SpFt {
         let font_name_byte_len = drv3_binio::utf16le_byte_len(&self.font_name) + 2; // + terminator
         let total_size = font_name_ptr + font_name_byte_len;
 
+        // Narrow every u32 header field up front so an oversized font fails
+        // here rather than silently truncating a count or offset on write.
+        let to_u32 = |value: usize, what: &str| {
+            u32::try_from(value)
+                .map_err(|_| BinError::malformed(0, format!("SpFt {what} exceeds u32")))
+        };
+        let font_name_len_u32 = to_u32(self.font_name.encode_utf16().count(), "font-name length")?;
+        let font_name_ptr_u32 = to_u32(font_name_ptr, "font-name offset")?;
+        let glyph_count_u32 = to_u32(glyphs.len(), "glyph count")?;
+        let bbox_table_ptr_u32 = to_u32(bbox_table_ptr, "bbox-table offset")?;
+        let bit_flags_ptr_u32 = to_u32(bit_flags_ptr, "bit-flags offset")?;
+        let index_table_ptr_u32 = to_u32(index_table_ptr, "index-table offset")?;
+        let font_name_ptrs_ptr_u32 = to_u32(font_name_ptrs_ptr, "font-name-pointers offset")?;
+
         let mut w = Writer::with_capacity(total_size);
 
         // Header (44 bytes, all u32 LE after the magic).
         w.write_bytes(MAGIC_SPFT);
         w.write_u32_le(self.unknown6);
         w.write_u32_le(effective_bit_flag_count);
-        w.write_u32_le(self.font_name.encode_utf16().count() as u32);
-        w.write_u32_le(font_name_ptr as u32);
-        w.write_u32_le(glyphs.len() as u32);
-        w.write_u32_le(bbox_table_ptr as u32);
-        w.write_u32_le(bit_flags_ptr as u32);
-        w.write_u32_le(index_table_ptr as u32);
+        w.write_u32_le(font_name_len_u32);
+        w.write_u32_le(font_name_ptr_u32);
+        w.write_u32_le(glyph_count_u32);
+        w.write_u32_le(bbox_table_ptr_u32);
+        w.write_u32_le(bit_flags_ptr_u32);
+        w.write_u32_le(index_table_ptr_u32);
         w.write_u32_le(self.scale_flag);
-        w.write_u32_le(font_name_ptrs_ptr as u32);
+        w.write_u32_le(font_name_ptrs_ptr_u32);
         debug_assert_eq!(w.position(), HEADER_SIZE as usize);
 
         // Bit-flag table — build in a buffer, then write.
@@ -245,8 +285,8 @@ impl SpFt {
         for (idx, glyph) in glyphs.iter().enumerate() {
             let char_offset = ((glyph.codepoint / 8) & !0b11) as usize;
             if written_windows.insert(char_offset) {
-                index_table[char_offset..char_offset + 4]
-                    .copy_from_slice(&(idx as u32).to_le_bytes());
+                let base = to_u32(idx, "glyph index")?;
+                index_table[char_offset..char_offset + 4].copy_from_slice(&base.to_le_bytes());
             }
         }
         w.write_bytes(&index_table);
@@ -268,14 +308,14 @@ impl SpFt {
 
         // Font-name pointers (4 × u32 LE, all equal to font_name_ptr).
         for _ in 0..4 {
-            w.write_u32_le(font_name_ptr as u32);
+            w.write_u32_le(font_name_ptr_u32);
         }
         debug_assert_eq!(w.position(), font_name_ptr);
 
         // Font name.
         w.write_utf16le_cstring(&self.font_name);
 
-        w.into_inner()
+        Ok(w.into_inner())
     }
 }
 
@@ -319,6 +359,19 @@ pub fn abc_to_xy(a: u8, b: u8, c: u8) -> (u16, u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_index_past_bbox_errors_without_panic() {
+        let mut bytes = sample().to_bytes().unwrap();
+        // glyph_count is the u32 LE at header offset 0x14. Shrinking it makes
+        // the bbox table shorter than the sparse indices reference, so the
+        // assembly step must error instead of indexing out of bounds.
+        bytes[0x14..0x18].copy_from_slice(&1u32.to_le_bytes());
+        assert!(matches!(
+            SpFt::parse(&bytes),
+            Err(BinError::Malformed { .. })
+        ));
+    }
 
     #[test]
     fn xy_packing_round_trip() {
@@ -374,15 +427,19 @@ mod tests {
     #[test]
     fn round_trip_preserves_bytes() {
         let spft = sample();
-        let bytes = spft.to_bytes();
+        let bytes = spft.to_bytes().unwrap();
         let parsed = SpFt::parse(&bytes).expect("parses back");
         assert_eq!(parsed, spft);
-        assert_eq!(parsed.to_bytes(), bytes, "second write must equal first");
+        assert_eq!(
+            parsed.to_bytes().unwrap(),
+            bytes,
+            "second write must equal first"
+        );
     }
 
     #[test]
     fn header_contains_correct_pointers() {
-        let bytes = sample().to_bytes();
+        let bytes = sample().to_bytes().unwrap();
         // BitFlagsPtr at 0x1C must be 0x2C.
         let bit_flags_ptr = u32::from_le_bytes(bytes[0x1C..0x20].try_into().unwrap());
         assert_eq!(bit_flags_ptr, 0x2C);
@@ -392,7 +449,7 @@ mod tests {
     fn glyphs_are_sorted_on_write() {
         let mut spft = sample();
         spft.glyphs.reverse(); // hand-scrambled
-        let bytes = spft.to_bytes();
+        let bytes = spft.to_bytes().unwrap();
         let parsed = SpFt::parse(&bytes).unwrap();
         let codes: Vec<_> = parsed.glyphs.iter().map(|g| g.codepoint).collect();
         assert_eq!(codes, vec![0x41, 0x42, 0x43, 0x61]);
@@ -400,7 +457,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_magic() {
-        let mut bytes = sample().to_bytes();
+        let mut bytes = sample().to_bytes().unwrap();
         bytes[0] = b'X';
         let err = SpFt::parse(&bytes).unwrap_err();
         assert!(matches!(err, BinError::BadMagic { .. }));
@@ -428,7 +485,7 @@ mod tests {
                 },
             ],
         };
-        let bytes = spft.to_bytes();
+        let bytes = spft.to_bytes().unwrap();
         let parsed = SpFt::parse(&bytes).unwrap();
         assert_eq!(parsed, spft);
     }
@@ -459,14 +516,14 @@ mod tests {
                 },
             ],
         };
-        let bytes = spft.to_bytes();
+        let bytes = spft.to_bytes().unwrap();
         let parsed = SpFt::parse(&bytes).unwrap();
         // Both glyphs survive; the table grew to cover U+00FC.
         assert!(parsed.glyphs.iter().any(|g| g.codepoint == 0x41));
         assert!(parsed.glyphs.iter().any(|g| g.codepoint == 0xFC));
         assert!(parsed.bit_flag_count >= 0xFD);
         // Idempotent on a second write.
-        assert_eq!(parsed.to_bytes(), bytes);
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
     }
 
     #[test]
@@ -485,7 +542,7 @@ mod tests {
                 kerning: (0, 0, 0),
             }],
         };
-        let parsed = SpFt::parse(&spft.to_bytes()).unwrap();
+        let parsed = SpFt::parse(&spft.to_bytes().unwrap()).unwrap();
         assert_eq!(parsed.bit_flag_count, 128);
     }
 }

@@ -1,6 +1,6 @@
 # Danganronpa V3 Tools
 
-A Rust toolkit — two CLI binaries plus eleven library crates — for reading,
+A Rust toolkit — two CLI binaries plus twelve library crates — for reading,
 writing, and patching the game data files shipped with
 *Danganronpa V3: Killing Harmony*.
 
@@ -22,7 +22,7 @@ writing, and patching the game data files shipped with
   in-engine against the US Windows release.
 - **STX string tables** — dump to JSON, edit, build back. Round-trip is
   byte-equal for every shipped STX.
-- **SPC inner archives** — extract and pack. Each subfile decompresses
+- **SPC archives** — extract and pack. Each subfile decompresses
   cleanly; semantic round-trip only (compressed bytes need not match the
   original encoder).
 - **DAT / WRD / SRD / SpFt** — parse and re-emit with full round-trip
@@ -43,7 +43,7 @@ exactly the surface they're shaped for.
 
 `drv3-cli` exposes one subcommand family per format:
 
-```
+```text
 drv3-cli cpk      list | extract | pack
 drv3-cli spc      list | extract | pack
 drv3-cli stx      dump | build
@@ -51,8 +51,12 @@ drv3-cli dat      dump | build
 drv3-cli wrd      dump | build | dialogue
 drv3-cli srd      inspect
 drv3-cli spft     dump | build
-drv3-cli roundtrip <any-file>
+drv3-cli roundtrip
 ```
+
+Inputs and outputs are named flags: every subcommand takes `--in
+<input>`, and those that produce a file also take `--out <output>`
+(e.g. `drv3-cli stx dump --in c00.stx --out c00.json`).
 
 Every subcommand reads or writes the JSON exchange format documented
 below, except `srd inspect` — that one prints a structural tree of the
@@ -61,12 +65,17 @@ triaging unfamiliar SRD containers.
 
 A second binary, `drv3-translate-cli`, drives the translation pipeline:
 
-```
+```text
 drv3-translate-cli apply     --json … --cpk … --out …
 drv3-translate-cli validate  --json … [--cpk …]
 ```
 
-### Libraries
+`apply` also accepts `--mode repack|extract`, `--on-drift`, `--report`,
+and `--threads`; `validate` exits nonzero when it finds drift or missing
+slots. See [`docs/json-schemas.md`](docs/json-schemas.md) for the full
+option reference.
+
+### Crates
 
 Each format has its own crate so you can pull in only what you need:
 
@@ -77,14 +86,15 @@ Each format has its own crate so you can pull in only what you need:
 | `drv3-compression` | SPC-LZSS codec; CRILAYLA header-recognition only. |
 | `drv3-cpk` | CRIWARE CPK archive reader/writer + the `@UTF` columnar primitive. |
 | `drv3-dat` | Typed columnar data tables with two string pools (UTF-8, UTF-16 LE). |
-| `drv3-dto` | serde DTOs + conversions for both JSON schemas — the dump/build/extract-pack exchange format and the translation patches. Keeps the libraries serde-free. |
-| `drv3-spc` | Spike-Chunsoft SPC inner archive. |
+| `drv3-dto` | serde DTOs + conversions for the dump/build/extract-pack **exchange** schema. Keeps the format libraries serde-free. |
+| `drv3-dto-patch` | serde DTOs for the **translation-patch** schema (`drv3-translate/v1`); depends on `drv3-dto` for shared glyph geometry. |
+| `drv3-spc` | Spike Chunsoft SPC archive. |
 | `drv3-spft` | `SpFt` font metadata block found inside SRD resources. |
 | `drv3-srd` | SRD block container (textures, fonts, vertex buffers, resource info). |
 | `drv3-stx` | STX string tables (the primary translation target). |
-| `drv3-translate` | Translation patch engine — applies STX text and font glyph patches to parsed CPKs in memory. Serde-free; the JSON schema lives in `drv3-dto`. |
-| `drv3-translate-cli` | CLI front-end for the translation pipeline (`apply` / `validate`) — consumes patch JSON via `drv3-dto`. |
-| `drv3-wrd` | Bytecode script container paired with STX dialogue files. |
+| `drv3-translate` | Translation patch engine — applies STX text and font glyph patches to parsed CPKs in memory. Serde-free; the JSON schema lives in `drv3-dto-patch`. |
+| `drv3-translate-cli` | CLI front-end for the translation pipeline (`apply` / `validate`) — consumes patch JSON via `drv3-dto-patch`. |
+| `drv3-wrd` | Byte-code script container paired with STX dialogue files. |
 
 Format-leaf crates (`drv3-stx`, `drv3-dat`, `drv3-wrd`, `drv3-srd`,
 `drv3-spft`) depend only on `drv3-binio` (plus the small `bitflags` crate
@@ -110,7 +120,7 @@ cargo build --release -p drv3-cli
 ### List what's inside a CPK
 
 ```sh
-drv3-cli cpk list path/to/partition_data_win_us.cpk | head
+drv3-cli cpk list --in path/to/partition_data_win_us.cpk | head
 # flash/adv/adv_6_kizuna_US.spc          (98368 bytes, id=0)
 # flash/adv/adv_6_limit_ar_US.spc        (7936 bytes, id=1)
 # wrd_script/003/chap0_text_US.SPC       (… bytes, id=…)
@@ -126,19 +136,19 @@ test.
 
 ```sh
 # 1. Extract the data CPK (writes file bodies + manifest.json).
-drv3-cli cpk extract path/to/partition_data_win_us.cpk work/data_win_us
+drv3-cli cpk extract --in path/to/partition_data_win_us.cpk --out work/data_win_us
 
 # 2. Open the chapter-0 dialogue SPC and dump its STX to JSON.
-drv3-cli spc extract work/data_win_us/wrd_script/003/chap0_text_US.SPC  work/chap0_text
-drv3-cli stx dump    work/chap0_text/c00_001_018.stx                    work/edit.json
+drv3-cli spc extract --in work/data_win_us/wrd_script/003/chap0_text_US.SPC --out work/chap0_text
+drv3-cli stx dump    --in work/chap0_text/c00_001_018.stx                --out work/edit.json
 
 # 3. Edit `work/edit.json` in your editor — change a `"text"` field.
 #    The first dialogue line lives in tables[0].entries[0].
 
 # 4. Build the JSON back into the STX, repack the SPC, repack the CPK.
-drv3-cli stx build   work/edit.json                                      work/chap0_text/c00_001_018.stx
-drv3-cli spc pack    work/chap0_text                                     work/data_win_us/wrd_script/003/chap0_text_US.SPC
-drv3-cli cpk pack    work/data_win_us                                    work/patched-data-win-us.cpk
+drv3-cli stx build   --in work/edit.json     --out work/chap0_text/c00_001_018.stx
+drv3-cli spc pack    --in work/chap0_text    --out work/data_win_us/wrd_script/003/chap0_text_US.SPC
+drv3-cli cpk pack    --in work/data_win_us   --out work/patched-data-win-us.cpk
 ```
 
 Drop the patched CPK into the game's `data/win/` directory (keep a
@@ -147,7 +157,7 @@ backup of the original!) and the edited line will show up in-game.
 ### Sanity-check a single file
 
 ```sh
-drv3-cli roundtrip work/chap0_text/c00_001_018.stx
+drv3-cli roundtrip --in work/chap0_text/c00_001_018.stx
 # stx (dialogue): round-trip byte-equal (… bytes)
 ```
 
@@ -198,7 +208,7 @@ for entry in &mut stx.tables[0].entries {
         entry.text = "Drücke eine Taste".into();
     }
 }
-std::fs::write("dialogue.stx", stx.to_bytes())?;
+std::fs::write("dialogue.stx", stx.to_bytes()?)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -224,7 +234,7 @@ if let Some(file) = cpk.file_mut("wrd_script/003", "chap0_text_US.SPC") {
         if let Some(entry) = stx.tables[0].entry_mut(0) {
             entry.text = "Drücke eine Taste".into();
         }
-        member.data = stx.to_bytes();           // STX bytes back into the SPC member
+        member.data = stx.to_bytes()?;          // STX bytes back into the SPC member
     }
     file.data = Cow::Owned(spc.to_bytes()?);    // SPC bytes back into the CPK file
 }
@@ -258,16 +268,16 @@ block tree.
 
 ## Building from source
 
-- **Rust stable**, edition 2024. The toolchain channel is pinned in
-  [`rust-toolchain.toml`](rust-toolchain.toml); the MSRV is the
-  `rust-version` in `Cargo.toml` (currently 1.96).
+- **Rust stable**, edition 2024. The toolchain channel is declared in
+  [`rust-toolchain.toml`](rust-toolchain.toml) (it tracks the current stable
+  release); the MSRV is the `rust-version` in `Cargo.toml` (currently 1.96).
 - Build everything:
 
   ```sh
   cargo build --workspace --release
   ```
 
-- Run the formatter and linter the way CI does:
+- Run the formatter and linter before pushing:
 
   ```sh
   cargo fmt --all
@@ -284,14 +294,14 @@ cargo test --workspace
 
 # Real-game-data integration test — gated behind #[ignore].
 # Place a shipped CPK at gamedata/partition_resident_win.cpk first.
-cargo test -p drv3-cpk -- --ignored
+cargo test -p drv3-cpk -- --ignored real_data
 ```
 
 ---
 
 ## Project layout
 
-```
+```text
 .
 ├── crates/                    every Rust crate lives here
 │   ├── drv3-binio/            foundation
@@ -299,19 +309,19 @@ cargo test -p drv3-cpk -- --ignored
 │   ├── drv3-compression/      CRILAYLA + SPC-LZSS
 │   ├── drv3-cpk/              CPK archive + @UTF table
 │   ├── drv3-dat/              DAT typed tables
-│   ├── drv3-dto/              JSON DTOs + conversions for both CLIs
-│   ├── drv3-spc/              SPC inner archive
+│   ├── drv3-dto/              JSON DTOs for the dump/build exchange schema
+│   ├── drv3-dto-patch/        JSON DTOs for the translation-patch schema
+│   ├── drv3-spc/              SPC archive
 │   ├── drv3-spft/             SpFt font metadata
 │   ├── drv3-srd/              SRD block container
 │   ├── drv3-stx/              STX string tables
 │   ├── drv3-translate/        translation patch engine
 │   ├── drv3-translate-cli/    CLI binary, front-end for drv3-translate
-│   └── drv3-wrd/              WRD bytecode scripts
+│   └── drv3-wrd/              WRD byte-code scripts
 ├── docs/
 │   ├── binary-formats.md      reverse-engineering reference for DR V3 on-disk bytes
 │   └── json-schemas.md        JSON sidecar + translation-patch schemas
 ├── gamedata/                  gitignored: your shipped CPKs
-├── samples/                   gitignored: scratch space for extracts
 ├── CONTRIBUTING.md            coding conventions and comment style
 └── README.md                  this file
 ```

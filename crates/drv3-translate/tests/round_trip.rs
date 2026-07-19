@@ -2,17 +2,17 @@
 //! STX files, apply a translation set, round-trip back through
 //! Cpk/Spc/Stx parsers, and assert the patched slots match.
 //!
-//! This test stays in-memory — no fixture files — so it's safe to run on
-//! every CI invocation. Real-data smoke tests against shipped CPKs live
-//! behind `#[ignore]` in the CLI crate.
+//! This test stays in-memory — no fixture files — so it runs without any
+//! game data on disk. Real-data smoke tests against shipped CPKs live
+//! behind `#[ignore]` in the `drv3-cpk` crate.
 
 use drv3_cpk::utf::UtfRow;
 use drv3_cpk::{Cpk, CpkFile};
 use drv3_spc::{COMPRESSION_STORED, Spc, SpcEntry};
 use drv3_stx::{Stx, StxEntry, StxTable};
 use drv3_translate::{
-    DriftPolicy, FileFormat, PatchOptions, StxEntryPatch, StxFileGroup, TranslationFileGroup,
-    TranslationSet, apply,
+    DriftPolicy, FileFormat, PatchOptions, StxEntryPatch, StxFileGroup, TranslateError,
+    TranslationFileGroup, TranslationSet, apply,
 };
 use indexmap::IndexMap;
 
@@ -29,7 +29,7 @@ fn synth_stx(strings: &[(u32, &str)]) -> Vec<u8> {
                 .collect(),
         }],
     };
-    stx.to_bytes()
+    stx.to_bytes().unwrap()
 }
 
 fn synth_spc(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
@@ -221,6 +221,24 @@ fn apply_errors_when_set_references_unsupplied_cpk() {
     let err = apply(&mut cpks, &set, &PatchOptions::default()).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("missing.cpk"), "unexpected error: {msg}");
+}
+
+#[test]
+fn apply_errors_when_same_cpk_name_supplied_twice() {
+    // The same name twice would double-apply the same file groups.
+    let mut cpk_a = synth_cpk(vec![]);
+    let mut cpk_b = synth_cpk(vec![]);
+    let set = TranslationSet {
+        source_language: "en".into(),
+        target_language: "de".into(),
+        files: vec![],
+    };
+    let mut cpks: Vec<(&str, &mut Cpk)> = vec![("data.cpk", &mut cpk_a), ("data.cpk", &mut cpk_b)];
+    let err = apply(&mut cpks, &set, &PatchOptions::default()).unwrap_err();
+    assert!(
+        matches!(err, TranslateError::DuplicateCpk(ref name) if name == "data.cpk"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

@@ -23,8 +23,8 @@
 //!              for each entry (table, index, source, target):
 //!                  compare on-disk source vs. JSON source (drift policy)
 //!                  set stx.tables[table].entries[where id == index].text = target
-//!              member.data = Stx::to_bytes()
-//!          file.data = Spc::to_bytes()
+//!              member.data = Stx::to_bytes()?
+//!          file.data = Spc::to_bytes()?
 //! ```
 //!
 //! Patching mutates the parsed [`Cpk`](drv3_cpk::Cpk) value in place. The

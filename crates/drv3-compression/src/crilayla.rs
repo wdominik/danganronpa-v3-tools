@@ -19,9 +19,8 @@
 
 use thiserror::Error;
 
-pub const MAGIC: &[u8; 8] = b"CRILAYLA";
-pub const HEADER_SIZE: usize = 0x10;
-pub const RAW_HEADER_TRAILER_SIZE: usize = 0x100;
+const MAGIC: &[u8; 8] = b"CRILAYLA";
+pub(crate) const HEADER_SIZE: usize = 0x10;
 
 /// Errors produced by the CRILAYLA codec.
 #[derive(Debug, Error)]
@@ -38,15 +37,39 @@ pub enum CrilaylaError {
     Truncated { got: usize },
 }
 
+/// Result alias for CRILAYLA codec operations.
+#[allow(
+    dead_code,
+    reason = "parked CRILAYLA codec; kept and test-covered for un-parking"
+)]
+pub(crate) type CrilaylaResult<T> = Result<T, CrilaylaError>;
+
+/// A CRILAYLA blob's header sizes.
+#[allow(
+    dead_code,
+    reason = "parked CRILAYLA codec; kept and test-covered for un-parking"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CrilaylaHeader {
+    /// Uncompressed (extracted) size in bytes, from header offset 0x08.
+    pub(crate) uncompressed_size: u32,
+    /// Compressed payload size in bytes, from header offset 0x0C.
+    pub(crate) compressed_size: u32,
+}
+
 /// Inspect a CRILAYLA blob's header without decompressing.
 ///
-/// Returns `(uncompressed_size, compressed_size)` from offsets 0x08 and 0x0C.
+/// Reads the uncompressed and compressed sizes at offsets 0x08 and 0x0C.
 ///
 /// # Errors
 ///
 /// Returns an error if `input` is shorter than the 16-byte header, or if
 /// the first 8 bytes don't equal the `CRILAYLA` magic.
-pub fn read_header(input: &[u8]) -> Result<(u32, u32), CrilaylaError> {
+#[allow(
+    dead_code,
+    reason = "parked CRILAYLA codec; kept and test-covered for un-parking"
+)]
+pub(crate) fn read_header(input: &[u8]) -> CrilaylaResult<CrilaylaHeader> {
     if input.len() < HEADER_SIZE {
         return Err(CrilaylaError::Truncated { got: input.len() });
     }
@@ -55,9 +78,13 @@ pub fn read_header(input: &[u8]) -> Result<(u32, u32), CrilaylaError> {
     }
     // The earlier `input.len() < HEADER_SIZE` check guarantees these
     // four-byte slices are in bounds; the array-pattern read is panic-free.
-    let uncompressed = u32::from_le_bytes([input[0x08], input[0x09], input[0x0A], input[0x0B]]);
-    let compressed = u32::from_le_bytes([input[0x0C], input[0x0D], input[0x0E], input[0x0F]]);
-    Ok((uncompressed, compressed))
+    let uncompressed_size =
+        u32::from_le_bytes([input[0x08], input[0x09], input[0x0A], input[0x0B]]);
+    let compressed_size = u32::from_le_bytes([input[0x0C], input[0x0D], input[0x0E], input[0x0F]]);
+    Ok(CrilaylaHeader {
+        uncompressed_size,
+        compressed_size,
+    })
 }
 
 /// Return whether the input begins with the CRILAYLA magic.
@@ -72,7 +99,11 @@ pub fn is_crilayla(input: &[u8]) -> bool {
 ///
 /// Always returns [`CrilaylaError::NotImplemented`] in v0.1. The CPK
 /// reader uses [`is_crilayla`] to refuse compressed entries up front.
-pub fn decompress(_input: &[u8]) -> Result<Vec<u8>, CrilaylaError> {
+#[allow(
+    dead_code,
+    reason = "parked CRILAYLA codec; kept and test-covered for un-parking"
+)]
+pub(crate) fn decompress(_input: &[u8]) -> CrilaylaResult<Vec<u8>> {
     Err(CrilaylaError::NotImplemented)
 }
 
@@ -81,7 +112,11 @@ pub fn decompress(_input: &[u8]) -> Result<Vec<u8>, CrilaylaError> {
 /// # Errors
 ///
 /// Always returns [`CrilaylaError::NotImplemented`] in v0.1.
-pub fn compress(_input: &[u8]) -> Result<Vec<u8>, CrilaylaError> {
+#[allow(
+    dead_code,
+    reason = "parked CRILAYLA codec; kept and test-covered for un-parking"
+)]
+pub(crate) fn compress(_input: &[u8]) -> CrilaylaResult<Vec<u8>> {
     Err(CrilaylaError::NotImplemented)
 }
 
@@ -101,9 +136,9 @@ mod tests {
         buf.extend_from_slice(MAGIC);
         buf.extend_from_slice(&1024u32.to_le_bytes());
         buf.extend_from_slice(&512u32.to_le_bytes());
-        let (uncompressed, compressed) = read_header(&buf).unwrap();
-        assert_eq!(uncompressed, 1024);
-        assert_eq!(compressed, 512);
+        let header = read_header(&buf).unwrap();
+        assert_eq!(header.uncompressed_size, 1024);
+        assert_eq!(header.compressed_size, 512);
     }
 
     #[test]
@@ -115,6 +150,12 @@ mod tests {
     #[test]
     fn decompress_returns_not_implemented() {
         let err = decompress(&[]).unwrap_err();
+        assert!(matches!(err, CrilaylaError::NotImplemented));
+    }
+
+    #[test]
+    fn compress_returns_not_implemented() {
+        let err = compress(&[]).unwrap_err();
         assert!(matches!(err, CrilaylaError::NotImplemented));
     }
 }

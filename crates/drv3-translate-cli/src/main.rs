@@ -1,4 +1,4 @@
-//! `drv3-translate` — apply translation JSON files to Danganronpa V3 CPKs.
+//! `drv3-translate-cli` — apply translation JSON files to Danganronpa V3 CPKs.
 //!
 //! The library crate [`drv3_translate`] does the heavy lifting; this binary
 //! handles I/O, argument parsing, JSON loading, and writing the patched
@@ -8,13 +8,14 @@ mod cmd_apply;
 mod cmd_validate;
 
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "drv3-translate",
+    name = "drv3-translate-cli",
     about = "Apply translation JSONs to Danganronpa V3 game data",
     version
 )]
@@ -97,10 +98,25 @@ impl From<DriftPolicyArg> for drv3_translate::DriftPolicy {
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("Error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     match &cli.cmd {
-        Cmd::Apply(args) => cmd_apply::run(args),
+        Cmd::Apply(args) => {
+            cmd_apply::run(args)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        // `validate` returns its own exit code: nonzero when it finds drift or
+        // missing slots, so it's usable as a scripted pre-flight check.
         Cmd::Validate(args) => cmd_validate::run(args),
     }
 }

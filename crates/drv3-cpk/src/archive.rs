@@ -9,8 +9,8 @@ use thiserror::Error;
 
 use crate::utf::{StorageFlag, UtfColumn, UtfRow, UtfTable, UtfType, UtfValue};
 
-pub(crate) const MAGIC_CPK: &[u8; 4] = b"CPK ";
-pub(crate) const MAGIC_TOC: &[u8; 4] = b"TOC ";
+const MAGIC_CPK: &[u8; 4] = b"CPK ";
+const MAGIC_TOC: &[u8; 4] = b"TOC ";
 
 pub(crate) const PACKET_WRAPPER_SIZE: u64 = 0x10;
 pub(crate) const DEFAULT_ALIGN: u16 = 0x800;
@@ -372,7 +372,12 @@ impl<'a> Cpk<'a> {
         let align = self.resolve_align()?;
         let pad_files = sorted_flag(&self.header_row) != 0;
 
-        // Pass 1: placeholder build, only to measure packet sizes.
+        // Pass 1: placeholder build, only to measure packet sizes. Two passes
+        // are unavoidable, not wasteful: the file/table offsets depend on the
+        // packet sizes, but the sizes are content-determined and independent of
+        // the offsets, so the writer must measure sizes first, then plan offsets
+        // and rebuild. The size-stability checks below guard that invariant —
+        // do not fold this into a single pass.
         let toc_size_pass1 =
             self.build_toc_table()?.to_bytes()?.len() + PACKET_WRAPPER_SIZE as usize;
         let header_size_pass1 = self
@@ -741,8 +746,10 @@ fn read_packet(r: &mut Reader<'_>, expected_magic: &[u8; 4]) -> BinResult<UtfTab
     let _flag = r.u32_le()?;
     let packet_size = r.u64_le()?;
     let utf_start = r.position();
-    let utf_end = utf_start + packet_size as usize;
-    let table = UtfTable::parse(&r.buffer()[utf_start..utf_end])?;
+    let utf_end = utf_start
+        .checked_add(packet_size as usize)
+        .ok_or_else(|| BinError::malformed(utf_start, "packet size overflows buffer"))?;
+    let table = UtfTable::parse(r.subslice(utf_start, utf_end)?)?;
     r.seek(utf_end)?;
     Ok(table)
 }
@@ -759,19 +766,11 @@ fn write_packet(out: &mut Vec<u8>, magic: &[u8; 4], utf_bytes: &[u8]) {
 }
 
 fn pad_to(out: &mut Vec<u8>, alignment: usize) {
-    let rem = out.len() % alignment;
-    if rem != 0 {
-        out.resize(out.len() + (alignment - rem), 0);
-    }
+    out.resize(drv3_binio::align_up(out.len(), alignment), 0);
 }
 
 fn pad_to_u64(value: u64, alignment: u64) -> u64 {
-    let rem = value % alignment;
-    if rem == 0 {
-        value
-    } else {
-        value + (alignment - rem)
-    }
+    drv3_binio::align_up(value, alignment)
 }
 
 fn required_u64(row: &UtfRow, name: &str, ctx: &'static str) -> CpkResult<u64> {

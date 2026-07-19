@@ -1,6 +1,10 @@
-//! On-disk JSON schema (`drv3-translate/v1`) and its conversion into the
-//! library's plain Rust model. The library crate is `serde`-free, so this
-//! module owns every `Deserialize` impl.
+//! Translation-patch JSON schema (`drv3-translate/v1`) and its conversion into
+//! the [`drv3_translate`] plain-Rust model.
+//!
+//! The `drv3-translate` engine is `serde`-free, so this crate owns every
+//! `Deserialize` impl for the patch documents. It shares the glyph-geometry
+//! DTOs with the dump/build exchange schema by depending on [`drv3_dto`] — see
+//! [`drv3_dto::glyph`].
 
 use std::path::{Path, PathBuf};
 
@@ -15,13 +19,14 @@ pub const EXPECTED_SCHEMA: &str = "drv3-translate/v1";
 
 /// Top-level JSON document.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TranslationDocJson {
     pub schema: String,
     #[serde(default)]
     pub source_language: String,
     #[serde(default)]
     pub target_language: String,
-    // Accepted-and-ignored: kept in the schema for translator audit trails
+    // Accepted-and-ignored: kept in the schema as a translator record
     // but the patcher has no use for either.
     #[serde(default)]
     pub created_at: Option<String>,
@@ -33,6 +38,13 @@ pub struct TranslationDocJson {
 /// File-group variant. Serde's internally-tagged enum dispatch on the
 /// `format` field — every variant gets the format string flattened
 /// alongside its own fields in the same object.
+///
+/// The variant payload structs (`StxFileGroupJson` / `FontFileGroupJson`)
+/// intentionally omit `#[serde(deny_unknown_fields)]`: with internal tagging,
+/// serde would reject the `format` tag itself as an "unknown field" on the
+/// variant. Their required fields still error on a typo (as a missing field),
+/// and the top-level `TranslationDocJson`, `EntryJson`, `AtlasJson`, and
+/// `FontGlyphJson` are all strict — so stray keys are caught almost everywhere.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "format", rename_all = "lowercase")]
 pub enum FileGroupJson {
@@ -49,6 +61,7 @@ pub struct StxFileGroupJson {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EntryJson {
     pub table: u32,
     pub index: u32,
@@ -76,17 +89,29 @@ pub struct FontFileGroupJson {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AtlasJson {
     pub width: u16,
     pub height: u16,
-    /// Pixel format of the *existing* atlas being patched: `"BC4"` (the
-    /// shipped format) or `"ARGB8888"` (an already-patched atlas). Other
-    /// values are rejected at conversion time. Patched atlases are always
-    /// re-emitted uncompressed as ARGB8888 regardless of this value.
-    pub format: String,
+    /// Pixel format of the *existing* atlas being patched. Patched atlases are
+    /// always re-emitted uncompressed as ARGB8888 regardless of this value — it
+    /// only names the source encoding. Validated at parse time.
+    pub format: AtlasFormatJson,
 }
 
-use crate::glyph::{KerningJson, PositionJson, SizeJson};
+/// Source atlas pixel format. Values are texture-format acronyms (matching the
+/// `TXR_FORMAT_*` constants and `binary-formats.md`), so this enum is
+/// intentionally exempt from the `snake_case` convention; the lowercase
+/// spellings are accepted as aliases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum AtlasFormatJson {
+    #[serde(rename = "BC4", alias = "bc4")]
+    Bc4,
+    #[serde(rename = "ARGB8888", alias = "argb8888")]
+    Argb8888,
+}
+
+use drv3_dto::glyph::{KerningJson, PositionJson, SizeJson};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,10 +167,10 @@ pub fn load_doc(path: &Path) -> Result<(TranslationDocJson, PathBuf)> {
 ///
 /// # Errors
 ///
-/// Returns an error if any file group declares an unknown `format`, any
-/// STX slot is referenced twice across all input docs, any font glyph
-/// codepoint is referenced twice within one font group, any
-/// `char`/`codepoint` pair disagrees, or any glyph's PNG can't be read.
+/// Returns an error if any STX slot is referenced twice across all input
+/// docs, any font glyph codepoint is referenced twice within one font
+/// group, any `char`/`codepoint` pair disagrees, or any glyph's PNG can't
+/// be read.
 pub fn merge_docs(docs: Vec<(TranslationDocJson, PathBuf)>) -> Result<TranslationSet> {
     let mut set = TranslationSet::default();
     let mut stx_seen: std::collections::HashSet<(String, String, String, u32, u32)> =
@@ -211,30 +236,14 @@ fn convert_stx_group(
 
 fn convert_font_group(fg: FontFileGroupJson, base: &Path, set: &mut TranslationSet) -> Result<()> {
     // Atlas geometry. `format` names the existing atlas we read from — the
-    // shipped BC4 or, when re-applying, ARGB8888. Patched atlases are always
-    // re-emitted uncompressed (ARGB8888) so the anti-aliased edges survive.
-    // Reject other source formats up front with a clear message.
-    let atlas = match fg.atlas {
-        Some(a) => {
-            let supported =
-                a.format.eq_ignore_ascii_case("BC4") || a.format.eq_ignore_ascii_case("ARGB8888");
-            if !supported {
-                return Err(anyhow!(
-                    "unsupported atlas format {:?} in font group {}::{}::{} \
-                     (only BC4 and ARGB8888 are supported)",
-                    a.format,
-                    fg.cpk,
-                    fg.cpk_path,
-                    fg.spc_member,
-                ));
-            }
-            Some(AtlasSpec {
-                width: a.width,
-                height: a.height,
-            })
-        }
-        None => None,
-    };
+    // shipped BC4 or, when re-applying, ARGB8888. It's validated at parse time
+    // by `AtlasFormatJson` and isn't otherwise consumed here: patched atlases
+    // are always re-emitted uncompressed (ARGB8888) so the anti-aliased edges
+    // survive.
+    let atlas = fg.atlas.map(|a| AtlasSpec {
+        width: a.width,
+        height: a.height,
+    });
 
     let mut codepoints: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut glyphs = Vec::with_capacity(fg.glyphs.len());
@@ -412,6 +421,33 @@ mod tests {
               "position": [10, 20],
               "size": { "width": 1, "height": 1 }
             }]
+          }]
+        }"#;
+        assert!(serde_json::from_str::<TranslationDocJson>(json).is_err());
+    }
+
+    #[test]
+    fn doc_rejects_unknown_top_level_key() {
+        // deny_unknown_fields on the envelope: a mistyped top-level key
+        // (`flies` for `files`) is a hard error, not silently dropped.
+        let json = r#"{
+          "schema": "drv3-translate/v1",
+          "files": [],
+          "flies": []
+        }"#;
+        assert!(serde_json::from_str::<TranslationDocJson>(json).is_err());
+    }
+
+    #[test]
+    fn atlas_rejects_unknown_format() {
+        // The atlas format enum validates at parse time — an unsupported pixel
+        // format is rejected before conversion. (Lowercase aliases still parse.)
+        let json = r#"{
+          "schema": "drv3-translate/v1",
+          "files": [{
+            "format": "font", "cpk": "a", "cpk_path": "b", "spc_member": "c",
+            "atlas": { "width": 64, "height": 64, "format": "DXT5" },
+            "glyphs": []
           }]
         }"#;
         assert!(serde_json::from_str::<TranslationDocJson>(json).is_err());

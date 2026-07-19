@@ -12,18 +12,22 @@ pub struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    /// Create a reader positioned at the start of `buf`.
     pub fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0 }
     }
 
+    /// Current cursor offset from the start of the buffer.
     pub fn position(&self) -> usize {
         self.pos
     }
 
+    /// Whether the cursor has reached the end of the buffer.
     pub fn is_empty(&self) -> bool {
         self.pos >= self.buf.len()
     }
 
+    /// Number of bytes between the cursor and the end of the buffer.
     pub fn remaining(&self) -> usize {
         self.buf.len().saturating_sub(self.pos)
     }
@@ -31,6 +35,44 @@ impl<'a> Reader<'a> {
     /// Whole underlying buffer (independent of `pos`).
     pub fn buffer(&self) -> &'a [u8] {
         self.buf
+    }
+
+    /// Borrow `buffer()[start..end]` with bounds and ordering checked.
+    ///
+    /// Unlike direct slice indexing, a malformed `start`/`end` returns an
+    /// error instead of panicking. The returned slice borrows the underlying
+    /// buffer (lifetime `'a`), independent of the cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `start > end` or `end` is past the end of the
+    /// buffer.
+    pub fn subslice(&self, start: usize, end: usize) -> BinResult<&'a [u8]> {
+        if start > end || end > self.buf.len() {
+            return Err(BinError::malformed(
+                start,
+                format!(
+                    "subslice {start:#x}..{end:#x} out of bounds ({} bytes)",
+                    self.buf.len()
+                ),
+            ));
+        }
+        Ok(&self.buf[start..end])
+    }
+
+    /// Capacity hint for a collection of `count` items, each at least
+    /// `min_item_bytes` on disk, clamped to what the buffer can still supply.
+    ///
+    /// Pre-sizing a `Vec` directly from an untrusted `count` lets a malformed
+    /// length field trigger a huge allocation before any bytes are read. This
+    /// clamps the hint so the allocation can never exceed the remaining input;
+    /// the per-item reads still fail with [`BinError::Eof`] if the data is
+    /// actually truncated. Returns `0` when `min_item_bytes` is `0`.
+    pub fn capacity_hint(&self, count: usize, min_item_bytes: usize) -> usize {
+        if min_item_bytes == 0 {
+            return 0;
+        }
+        count.min(self.remaining() / min_item_bytes)
     }
 
     /// Seek to an absolute offset.
@@ -62,17 +104,22 @@ impl<'a> Reader<'a> {
         self.seek(target)
     }
 
-    /// Advance the cursor to the next multiple of `alignment` (>= 1).
+    /// Advance the cursor to the next multiple of `alignment`.
     ///
     /// # Errors
     ///
     /// Returns an error if the resulting position is past the end of the
     /// buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics (division by zero) if `alignment` is `0`. Every call site passes
+    /// a non-zero literal; `alignment` is never derived from parsed input.
     pub fn align_to(&mut self, alignment: usize) -> BinResult<()> {
-        debug_assert!(alignment.is_power_of_two() || alignment >= 1);
-        let rem = self.pos % alignment;
-        if rem != 0 {
-            self.skip(alignment - rem)?;
+        debug_assert!(alignment != 0, "alignment must be non-zero");
+        let padding = crate::align_up(self.pos, alignment) - self.pos;
+        if padding != 0 {
+            self.skip(padding)?;
         }
         Ok(())
     }
@@ -102,20 +149,10 @@ impl<'a> Reader<'a> {
     ///
     /// Returns an error if fewer than `n` bytes remain in the buffer.
     pub fn bytes(&mut self, n: usize) -> BinResult<&'a [u8]> {
-        let end = self.pos.checked_add(n).ok_or(BinError::Eof {
-            pos: self.pos,
-            wanted: n,
-            remaining: self.remaining(),
-        })?;
-        if end > self.buf.len() {
-            return Err(BinError::Eof {
-                pos: self.pos,
-                wanted: n,
-                remaining: self.remaining(),
-            });
-        }
-        let slice = &self.buf[self.pos..end];
-        self.pos = end;
+        // The returned slice borrows the underlying buffer (`'a`), not `self`,
+        // so the immutable `peek_bytes` borrow ends before we advance the cursor.
+        let slice = self.peek_bytes(n)?;
+        self.pos += n;
         Ok(slice)
     }
 
@@ -258,6 +295,29 @@ mod tests {
         })
         .unwrap();
         assert_eq!(r.position(), 4);
+    }
+
+    #[test]
+    fn subslice_bounds_checked() {
+        let r = Reader::new(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(r.subslice(2, 5).unwrap(), &[2, 3, 4]);
+        assert_eq!(r.subslice(4, 4).unwrap(), &[] as &[u8]);
+        // end past the buffer and start > end both error rather than panic.
+        assert!(matches!(r.subslice(4, 9), Err(BinError::Malformed { .. })));
+        assert!(matches!(r.subslice(5, 2), Err(BinError::Malformed { .. })));
+    }
+
+    #[test]
+    fn capacity_hint_clamps_to_remaining() {
+        let mut r = Reader::new(&[0u8; 32]);
+        // A hostile count is clamped to what the buffer could supply.
+        assert_eq!(r.capacity_hint(1_000_000_000, 8), 4);
+        // A count smaller than the ceiling passes through unchanged.
+        assert_eq!(r.capacity_hint(3, 8), 3);
+        // Zero item size never divides by zero.
+        assert_eq!(r.capacity_hint(1_000, 0), 0);
+        r.seek(32).unwrap();
+        assert_eq!(r.capacity_hint(1_000, 8), 0);
     }
 
     #[test]

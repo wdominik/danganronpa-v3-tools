@@ -27,8 +27,8 @@
 //!
 //! ```no_run
 //! use drv3_stx::Stx;
-//! let bytes = std::fs::read("dialogue.stx").unwrap();
-//! let mut stx = Stx::parse(&bytes).unwrap();
+//! let bytes = std::fs::read("dialogue.stx")?;
+//! let mut stx = Stx::parse(&bytes)?;
 //! for entry in &stx.tables[0].entries {
 //!     println!("{}: {}", entry.id, entry.text);
 //! }
@@ -36,12 +36,16 @@
 //! if let Some(entry) = stx.tables[0].entry_mut(1) {
 //!     entry.text = "Neuer Text".to_string();
 //! }
-//! std::fs::write("dialogue.stx", stx.to_bytes()).unwrap();
+//! std::fs::write("dialogue.stx", stx.to_bytes()?)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! Fallible operations surface [`drv3_binio::BinResult`] directly; this crate
+//! defines no error type of its own.
 
 use std::collections::HashMap;
 
-use drv3_binio::{BinResult, Reader, Writer, utf16le_byte_len};
+use drv3_binio::{BinError, BinResult, Reader, Writer, utf16le_byte_len};
 
 const MAGIC_STXT: &[u8; 4] = b"STXT";
 const MAGIC_JPLL: &[u8; 4] = b"JPLL";
@@ -103,8 +107,11 @@ impl Stx {
         // declared string count explicitly — recovering it later from
         // `Vec::capacity()` would lean on an allocation hint that is only
         // guaranteed to be >= the requested value, not exactly equal.
-        let mut tables: Vec<StxTable> = Vec::with_capacity(table_count);
-        let mut counts: Vec<usize> = Vec::with_capacity(table_count);
+        // Each table-info entry is 16 bytes and each index entry is 8 bytes;
+        // cap the hints so a malformed count fails on a bounded read rather
+        // than a huge pre-allocation.
+        let mut tables: Vec<StxTable> = Vec::with_capacity(r.capacity_hint(table_count, 16));
+        let mut counts: Vec<usize> = Vec::with_capacity(r.capacity_hint(table_count, 16));
         for _ in 0..table_count {
             let unknown = r.u32_le()?;
             let string_count = r.u32_le()? as usize;
@@ -112,7 +119,7 @@ impl Stx {
             counts.push(string_count);
             tables.push(StxTable {
                 unknown,
-                entries: Vec::with_capacity(string_count),
+                entries: Vec::with_capacity(r.capacity_hint(string_count, 8)),
             });
         }
 
@@ -138,13 +145,20 @@ impl Stx {
     /// stores duplicates separately will produce a larger, non-byte-equal
     /// output, but the game itself reads it back identically.
     ///
+    /// # Errors
+    ///
+    /// Returns [`BinError::Malformed`] if the table count, a per-table entry
+    /// count, or a section offset exceeds `u32::MAX` — each is stored as a
+    /// 32-bit little-endian header field, so an STX that large cannot be
+    /// represented on disk.
+    ///
     /// # Panics
     ///
     /// Panics in the unreachable case where the writer's internal patch
-    /// slots become inconsistent (each `# expect()` documents the
-    /// invariant being asserted). User input cannot trigger these — they
-    /// guard against bugs in the writer itself.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// slots become inconsistent (each `expect()` documents the invariant
+    /// being asserted). User input cannot trigger these — they guard against
+    /// bugs in the writer itself.
+    pub fn to_bytes(&self) -> BinResult<Vec<u8>> {
         // Pre-size by what we can compute up front: header + table-info +
         // index-array + worst-case strings.
         let total_entries: usize = self.tables.iter().map(|t| t.entries.len()).sum();
@@ -161,19 +175,26 @@ impl Stx {
         // Header.
         w.write_bytes(MAGIC_STXT);
         w.write_bytes(MAGIC_JPLL);
-        w.write_u32_le(self.tables.len() as u32);
+        w.write_u32_le(
+            u32::try_from(self.tables.len())
+                .map_err(|_| BinError::malformed(0, "STX table count exceeds u32"))?,
+        );
         let table_offset_patch = w.reserve_u32_le();
 
         // Table-info section.
         for table in &self.tables {
             w.write_u32_le(table.unknown);
-            w.write_u32_le(table.entries.len() as u32);
+            w.write_u32_le(
+                u32::try_from(table.entries.len())
+                    .map_err(|_| BinError::malformed(0, "STX table entry count exceeds u32"))?,
+            );
             w.write_fill(8, 0);
         }
 
         // Index array — one slot per entry; will be patched as strings are
         // written. Slots are laid out in table order.
-        let table_offset = w.position() as u32;
+        let table_offset = u32::try_from(w.position())
+            .map_err(|_| BinError::malformed(0, "STX index-array offset exceeds u32"))?;
         w.patch_u32_le(table_offset_patch, table_offset)
             .expect("placeholder size matches u32");
         let mut slot_patches: Vec<(u32, drv3_binio::Patch)> = Vec::with_capacity(total_entries);
@@ -193,7 +214,9 @@ impl Stx {
                 let offset = if let Some(&existing) = written.get(entry.text.as_str()) {
                     existing
                 } else {
-                    let pos = w.position() as u32;
+                    let pos = u32::try_from(w.position()).map_err(|_| {
+                        BinError::malformed(0, "STX string-data offset exceeds u32")
+                    })?;
                     w.write_utf16le_cstring(&entry.text);
                     written.insert(entry.text.as_str(), pos);
                     pos
@@ -205,7 +228,7 @@ impl Stx {
         }
         debug_assert!(slot_iter.next().is_none(), "slot count matches entry count");
 
-        w.into_inner()
+        Ok(w.into_inner())
     }
 }
 
@@ -250,17 +273,17 @@ mod tests {
     #[test]
     fn round_trip_preserves_bytes() {
         let stx = sample();
-        let bytes = stx.to_bytes();
+        let bytes = stx.to_bytes().unwrap();
         let parsed = Stx::parse(&bytes).expect("parses back");
         assert_eq!(parsed, stx);
         // Re-encode and confirm byte-stable.
-        assert_eq!(parsed.to_bytes(), bytes);
+        assert_eq!(parsed.to_bytes().unwrap(), bytes);
     }
 
     #[test]
     fn dedup_shares_offset_for_identical_text() {
         let stx = sample();
-        let bytes = stx.to_bytes();
+        let bytes = stx.to_bytes().unwrap();
 
         // Walk the index array directly and confirm entry 0 and entry 1
         // point to the same offset.
@@ -276,7 +299,7 @@ mod tests {
     #[test]
     fn header_magic_and_counts_correct() {
         let stx = sample();
-        let bytes = stx.to_bytes();
+        let bytes = stx.to_bytes().unwrap();
         assert_eq!(&bytes[..4], b"STXT");
         assert_eq!(&bytes[4..8], b"JPLL");
         assert_eq!(&bytes[8..12], &1u32.to_le_bytes()); // table count
@@ -284,10 +307,19 @@ mod tests {
 
     #[test]
     fn rejects_bad_magic() {
-        let mut bytes = sample().to_bytes();
+        let mut bytes = sample().to_bytes().unwrap();
         bytes[0] = b'X';
         let err = Stx::parse(&bytes).unwrap_err();
         assert!(matches!(err, drv3_binio::BinError::BadMagic { .. }));
+    }
+
+    #[test]
+    fn huge_table_count_does_not_over_allocate() {
+        let mut bytes = sample().to_bytes().unwrap();
+        // table_count is the u32 LE at offset 0x08. A hostile count must fail
+        // on a bounded read, not by pre-allocating billions of tables.
+        bytes[0x08..0x0C].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        assert!(Stx::parse(&bytes).is_err());
     }
 
     #[test]
@@ -298,7 +330,7 @@ mod tests {
                 entries: vec![],
             }],
         };
-        let bytes = stx.to_bytes();
+        let bytes = stx.to_bytes().unwrap();
         let parsed = Stx::parse(&bytes).unwrap();
         assert_eq!(parsed, stx);
     }
@@ -320,7 +352,7 @@ mod tests {
                 ],
             }],
         };
-        let bytes = stx.to_bytes();
+        let bytes = stx.to_bytes().unwrap();
         let parsed = Stx::parse(&bytes).unwrap();
         assert_eq!(parsed, stx);
     }

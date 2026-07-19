@@ -1,17 +1,16 @@
-//! JSON DTOs and conversions for the Danganronpa V3 CLIs.
+//! JSON DTOs and conversions for the Danganronpa V3 `dump` / `build` /
+//! extract-pack **exchange** schema.
 //!
-//! This crate owns the project's serde layer: the `dump` / `build` /
-//! extract-pack **exchange** schema (the per-format modules below plus the CPK
-//! and SPC manifests) and the translation-**patch** schema ([`patch`]). The
-//! format library crates stay serde-free — they expose plain Rust types, and
-//! this crate maps them to and from the human-editable JSON the CLIs read and
-//! write. Glyph geometry shared by `spft` and `patch` lives in an internal
-//! `glyph` module.
+//! This crate owns the serde layer for the per-format sidecars (the modules
+//! below) plus the CPK and SPC manifests. The format library crates stay
+//! serde-free — they expose plain Rust types, and this crate maps them to and
+//! from the human-editable JSON `drv3-cli` reads and writes. The
+//! translation-**patch** schema lives in the separate `drv3-dto-patch` crate,
+//! which reuses this crate's [`glyph`] geometry DTOs.
 
 #![allow(clippy::wildcard_imports)]
 
-mod glyph;
-pub mod patch;
+pub mod glyph;
 
 use serde::{Deserialize, Serialize};
 
@@ -19,18 +18,28 @@ use serde::{Deserialize, Serialize};
 pub mod stx {
     use super::*;
 
+    /// Schema tag carried by every STX exchange JSON document.
+    pub const STX_SCHEMA: &str = "drv3-stx/v1";
+
+    /// JSON document for one STX string-table file.
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub struct StxJson {
+        pub schema: String,
         pub tables: Vec<StxTableJson>,
     }
 
+    /// One sub-table within an STX file.
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub struct StxTableJson {
         pub unknown: u32,
         pub entries: Vec<StxEntryJson>,
     }
 
+    /// A single `(id, text)` string entry.
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub struct StxEntryJson {
         pub id: u32,
         pub text: String,
@@ -39,6 +48,7 @@ pub mod stx {
     impl From<&drv3_stx::Stx> for StxJson {
         fn from(stx: &drv3_stx::Stx) -> Self {
             Self {
+                schema: STX_SCHEMA.to_string(),
                 tables: stx
                     .tables
                     .iter()
@@ -58,9 +68,13 @@ pub mod stx {
         }
     }
 
-    impl From<StxJson> for drv3_stx::Stx {
-        fn from(j: StxJson) -> Self {
-            Self {
+    impl TryFrom<StxJson> for drv3_stx::Stx {
+        type Error = anyhow::Error;
+        fn try_from(j: StxJson) -> anyhow::Result<Self> {
+            if j.schema != STX_SCHEMA {
+                anyhow::bail!("unsupported schema {:?} (expected {STX_SCHEMA})", j.schema);
+            }
+            Ok(Self {
                 tables: j
                     .tables
                     .into_iter()
@@ -76,22 +90,31 @@ pub mod stx {
                             .collect(),
                     })
                     .collect(),
-            }
+            })
         }
     }
 }
 
+/// JSON shape for a DAT typed-table file.
 pub mod dat {
     use super::*;
     use drv3_dat::{Cell, Column, ColumnType, Dat};
 
+    /// Schema tag carried by every DAT exchange JSON document.
+    pub const DAT_SCHEMA: &str = "drv3-dat/v1";
+
+    /// JSON document for a DAT typed table: a column schema plus tagged rows.
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub struct DatJson {
-        pub schema: Vec<ColumnJson>,
+        pub schema: String,
+        pub columns: Vec<ColumnJson>,
         pub rows: Vec<Vec<CellJson>>,
     }
 
+    /// One column definition: name, type tag, and per-row element count.
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub struct ColumnJson {
         pub name: String,
         #[serde(rename = "type")]
@@ -99,8 +122,10 @@ pub mod dat {
         pub count: u16,
     }
 
+    /// A tagged cell value: the `type` tag selects the variant and `values`
+    /// carries its array of elements.
     #[derive(Debug, Serialize, Deserialize)]
-    #[serde(tag = "type", content = "values", rename_all = "lowercase")]
+    #[serde(tag = "type", content = "values", rename_all = "snake_case")]
     pub enum CellJson {
         U8(Vec<u8>),
         U16(Vec<u16>),
@@ -159,7 +184,8 @@ pub mod dat {
     impl From<&Dat> for DatJson {
         fn from(d: &Dat) -> Self {
             Self {
-                schema: d
+                schema: DAT_SCHEMA.to_string(),
+                columns: d
                     .schema
                     .iter()
                     .map(|c| ColumnJson {
@@ -180,8 +206,11 @@ pub mod dat {
     impl TryFrom<DatJson> for Dat {
         type Error = anyhow::Error;
         fn try_from(j: DatJson) -> anyhow::Result<Self> {
+            if j.schema != DAT_SCHEMA {
+                anyhow::bail!("unsupported schema {:?} (expected {DAT_SCHEMA})", j.schema);
+            }
             let schema = j
-                .schema
+                .columns
                 .into_iter()
                 .map(|c| {
                     let ty = ColumnType::from_tag(&c.ty)
@@ -203,12 +232,19 @@ pub mod dat {
     }
 }
 
+/// JSON shape for a `SpFt` font-metadata block.
 pub mod spft {
     use super::*;
     use drv3_spft::{Glyph, SpFt};
 
+    /// Schema tag carried by every `SpFt` exchange JSON document.
+    pub const SPFT_SCHEMA: &str = "drv3-spft/v1";
+
+    /// JSON document for a `SpFt` font: header fields plus per-glyph metrics.
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub struct SpFtJson {
+        pub schema: String,
         pub unknown6: u32,
         pub bit_flag_count: u32,
         pub scale_flag: u32,
@@ -216,7 +252,9 @@ pub mod spft {
         pub glyphs: Vec<GlyphJson>,
     }
 
+    /// One glyph's codepoint plus its atlas position, size, and kerning.
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub struct GlyphJson {
         pub codepoint: u32,
         pub position: PositionJson,
@@ -229,6 +267,7 @@ pub mod spft {
     impl From<&SpFt> for SpFtJson {
         fn from(s: &SpFt) -> Self {
             Self {
+                schema: SPFT_SCHEMA.to_string(),
                 unknown6: s.unknown6,
                 bit_flag_count: s.bit_flag_count,
                 scale_flag: s.scale_flag,
@@ -257,9 +296,13 @@ pub mod spft {
         }
     }
 
-    impl From<SpFtJson> for SpFt {
-        fn from(j: SpFtJson) -> Self {
-            Self {
+    impl TryFrom<SpFtJson> for SpFt {
+        type Error = anyhow::Error;
+        fn try_from(j: SpFtJson) -> anyhow::Result<Self> {
+            if j.schema != SPFT_SCHEMA {
+                anyhow::bail!("unsupported schema {:?} (expected {SPFT_SCHEMA})", j.schema);
+            }
+            Ok(Self {
                 unknown6: j.unknown6,
                 bit_flag_count: j.bit_flag_count,
                 scale_flag: j.scale_flag,
@@ -274,7 +317,7 @@ pub mod spft {
                         kerning: (g.kerning.left, g.kerning.right, g.kerning.vertical),
                     })
                     .collect(),
-            }
+            })
         }
     }
 
@@ -310,7 +353,10 @@ pub mod spft {
             assert!(json.contains("\"x\":10"));
             assert!(json.contains("\"width\":30"));
             assert!(json.contains("\"vertical\":5"));
-            let back: SpFt = serde_json::from_str::<SpFtJson>(&json).unwrap().into();
+            let back: SpFt = serde_json::from_str::<SpFtJson>(&json)
+                .unwrap()
+                .try_into()
+                .unwrap();
             assert_eq!(back, spft);
         }
 
@@ -329,12 +375,20 @@ pub mod spft {
     }
 }
 
+/// JSON shape for a WRD byte-code script.
 pub mod wrd {
     use super::*;
     use drv3_wrd::{Command, LocalBranch, Wrd};
 
+    /// Schema tag carried by every WRD exchange JSON document.
+    pub const WRD_SCHEMA: &str = "drv3-wrd/v1";
+
+    /// JSON document for a WRD script: the opcode stream plus its label,
+    /// parameter, and string tables.
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub struct WrdJson {
+        pub schema: String,
         pub unknown1: u32,
         pub external_string_count: u16,
         pub commands: Vec<CommandJson>,
@@ -342,16 +396,21 @@ pub mod wrd {
         pub label_offsets: Vec<u16>,
         pub label_names: Vec<String>,
         pub parameters: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         pub internal_strings: Option<Vec<String>>,
     }
 
+    /// One byte-code command: an opcode and its argument words.
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub struct CommandJson {
         pub opcode: u8,
         pub args: Vec<u16>,
     }
 
+    /// One local branch target: a label id and its byte offset.
     #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
     pub struct LocalBranchJson {
         pub id: u16,
         pub offset: u16,
@@ -360,6 +419,7 @@ pub mod wrd {
     impl From<&Wrd> for WrdJson {
         fn from(w: &Wrd) -> Self {
             Self {
+                schema: WRD_SCHEMA.to_string(),
                 unknown1: w.unknown1,
                 external_string_count: w.external_string_count,
                 commands: w
@@ -386,9 +446,13 @@ pub mod wrd {
         }
     }
 
-    impl From<WrdJson> for Wrd {
-        fn from(j: WrdJson) -> Self {
-            Self {
+    impl TryFrom<WrdJson> for Wrd {
+        type Error = anyhow::Error;
+        fn try_from(j: WrdJson) -> anyhow::Result<Self> {
+            if j.schema != WRD_SCHEMA {
+                anyhow::bail!("unsupported schema {:?} (expected {WRD_SCHEMA})", j.schema);
+            }
+            Ok(Self {
                 unknown1: j.unknown1,
                 external_string_count: j.external_string_count,
                 commands: j
@@ -411,7 +475,7 @@ pub mod wrd {
                 label_names: j.label_names,
                 parameters: j.parameters,
                 internal_strings: j.internal_strings,
-            }
+            })
         }
     }
 }
@@ -481,8 +545,9 @@ pub mod utf {
         }
     }
 
+    /// JSON tag for a column's storage class (mirrors `drv3_cpk::StorageFlag`).
     #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "PascalCase")]
+    #[serde(rename_all = "snake_case")]
     pub enum StorageFlagJson {
         None,
         Zero,
@@ -515,8 +580,9 @@ pub mod utf {
         }
     }
 
+    /// JSON tag for a column's value type (mirrors `drv3_cpk::UtfType`).
     #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "lowercase")]
+    #[serde(rename_all = "snake_case")]
     pub enum UtfTypeJson {
         U8,
         S8,
@@ -570,8 +636,12 @@ pub mod utf {
         }
     }
 
+    /// JSON shape for one `@UTF` column: optional name, storage class, type,
+    /// and an optional inline constant value.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
     pub struct UtfColumnJson {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         pub name: Option<String>,
         pub storage: StorageFlagJson,
         #[serde(rename = "type")]
@@ -689,14 +759,16 @@ pub mod cpk_manifest {
     pub const ITOC_SIDECAR: &str = "_itoc.bin";
     pub const GTOC_SIDECAR: &str = "_gtoc.bin";
 
-    /// Current manifest schema version. The project is pre-1.0; the schema
-    /// may change in place without bumping this number — readers reject any
-    /// other value. Versioning starts on 1.0.0.
-    pub const MANIFEST_VERSION: u32 = 1;
+    /// Schema tag carried by every CPK manifest. The project is pre-1.0; the
+    /// schema may change in place at `v1` — readers reject any other value.
+    pub const CPK_MANIFEST_SCHEMA: &str = "drv3-cpk/v1";
 
+    /// The full CPK manifest: schema tag, header `@UTF` table, TOC column
+    /// schema, file list, and optional sidecar-packet filenames.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
     pub struct CpkManifestJson {
-        pub version: u32,
+        pub schema: String,
         pub header: HeaderJson,
         /// TOC `@UTF` column schema, preserved verbatim from extract so pack
         /// can re-emit the same column order, types, and storage flags.
@@ -711,7 +783,10 @@ pub mod cpk_manifest {
         pub gtoc_packet: Option<String>,
     }
 
+    /// The CPK header `@UTF` table: its column schema plus the single row of
+    /// `PerRow` values.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
     pub struct HeaderJson {
         /// Column schema, in declaration order — preserves storage flags and types.
         pub columns: Vec<UtfColumnJson>,
@@ -721,7 +796,10 @@ pub mod cpk_manifest {
         pub row: BTreeMap<String, UtfValueJson>,
     }
 
+    /// One CPK file entry: its extract-relative path, id, user string, and any
+    /// extra TOC columns preserved verbatim.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
     pub struct CpkFileJson {
         /// Forward-slash relative path inside the extract directory (`<dir_name>/<file_name>`).
         pub path: String,
@@ -758,7 +836,7 @@ pub mod cpk_manifest {
                 })
                 .collect();
             Self {
-                version: MANIFEST_VERSION,
+                schema: CPK_MANIFEST_SCHEMA.to_string(),
                 header: HeaderJson { columns, row },
                 toc_columns,
                 files,
@@ -775,7 +853,7 @@ pub mod cpk_manifest {
         ///
         /// # Errors
         ///
-        /// Returns an error if the manifest schema `version` is unsupported,
+        /// Returns an error if the manifest `schema` tag is unsupported,
         /// `toc_columns` is empty, a header/TOC column or value fails to
         /// convert, or a file path is absolute or contains `..` / `.` segments.
         pub fn into_cpk(
@@ -785,11 +863,11 @@ pub mod cpk_manifest {
             itoc: Option<Vec<u8>>,
             gtoc: Option<Vec<u8>>,
         ) -> anyhow::Result<Cpk<'static>> {
-            if self.version != MANIFEST_VERSION {
+            if self.schema != CPK_MANIFEST_SCHEMA {
                 anyhow::bail!(
-                    "manifest schema version {} is not supported (this build expects {})",
-                    self.version,
-                    MANIFEST_VERSION,
+                    "manifest schema {:?} is not supported (this build expects {})",
+                    self.schema,
+                    CPK_MANIFEST_SCHEMA,
                 );
             }
             let header_columns: Vec<UtfColumn> = self
@@ -908,16 +986,19 @@ pub mod spc_manifest {
     use drv3_spc::{COMPRESSION_LZSS, COMPRESSION_STORED, Spc, SpcEntry};
 
     pub const MANIFEST_FILENAME: &str = "manifest.json";
-    /// Pre-1.0 the schema may change in place without bumping this value.
-    /// Versioning begins on 1.0.0.
-    pub const MANIFEST_VERSION: u32 = 1;
+    /// Schema tag carried by every SPC manifest. Pre-1.0 the schema may change
+    /// in place at `v1`; readers reject any other value.
+    pub const SPC_MANIFEST_SCHEMA: &str = "drv3-spc/v1";
 
     /// Size of the `unknown1` field in bytes — fixed by the SPC format.
     const UNKNOWN1_LEN: usize = 0x24;
 
+    /// The full SPC manifest: schema tag, archive-level `unknown1`/`unknown2`
+    /// bytes, and the per-entry metadata in on-disk order.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
     pub struct SpcManifestJson {
-        pub version: u32,
+        pub schema: String,
         /// Hex-encoded 36 bytes from SPC header offset `0x04`.
         pub unknown1: String,
         /// u32 at SPC header offset `0x2C`.
@@ -927,10 +1008,13 @@ pub mod spc_manifest {
         pub entries: Vec<SpcEntryJson>,
     }
 
+    /// One SPC entry's metadata: name, compression method, and opaque flags.
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
     pub struct SpcEntryJson {
-        /// Entry name, UTF-8. DR V3 ships ASCII-only names; non-UTF-8
-        /// names are rejected at extract time.
+        /// Entry name, UTF-8. DR V3 ships ASCII-only names. `drv3-cli spc
+        /// extract` rejects a non-UTF-8 name before writing the manifest;
+        /// the `From<&Spc>` conversion substitutes an empty string.
         pub name: String,
         /// `"stored"` or `"lzss"` — readable rendering of the on-disk
         /// `compression_flag` (1 / 2 respectively).
@@ -939,8 +1023,9 @@ pub mod spc_manifest {
         pub unknown_flag: i16,
     }
 
+    /// JSON tag for an entry's compression: `stored` or `lzss`.
     #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "lowercase")]
+    #[serde(rename_all = "snake_case")]
     pub enum SpcCompressionJson {
         Stored,
         Lzss,
@@ -977,7 +1062,7 @@ pub mod spc_manifest {
                 })
                 .collect();
             Self {
-                version: MANIFEST_VERSION,
+                schema: SPC_MANIFEST_SCHEMA.to_string(),
                 unknown1: super::utf::hex_encode(&spc.unknown1),
                 unknown2: spc.unknown2,
                 entries,
@@ -991,16 +1076,16 @@ pub mod spc_manifest {
         ///
         /// # Errors
         ///
-        /// Returns an error if `version` is not [`MANIFEST_VERSION`],
+        /// Returns an error if the `schema` tag is not [`SPC_MANIFEST_SCHEMA`],
         /// `unknown1` does not decode to exactly 36 bytes,
         /// `entries.len()` differs from `entry_bodies.len()`, or any
         /// entry's UTF-8 name fails the round-trip.
         pub fn into_spc(self, entry_bodies: Vec<Vec<u8>>) -> anyhow::Result<Spc> {
-            if self.version != MANIFEST_VERSION {
+            if self.schema != SPC_MANIFEST_SCHEMA {
                 anyhow::bail!(
-                    "manifest schema version {} is not supported (this build expects {})",
-                    self.version,
-                    MANIFEST_VERSION,
+                    "manifest schema {:?} is not supported (this build expects {})",
+                    self.schema,
+                    SPC_MANIFEST_SCHEMA,
                 );
             }
             if self.entries.len() != entry_bodies.len() {
@@ -1086,7 +1171,7 @@ pub mod spc_manifest {
         #[test]
         fn manifest_rejects_wrong_unknown1_length() {
             let mut m = SpcManifestJson {
-                version: MANIFEST_VERSION,
+                schema: SPC_MANIFEST_SCHEMA.to_string(),
                 unknown1: "00".to_string(), // only 1 byte
                 unknown2: 0,
                 entries: vec![],
@@ -1100,7 +1185,7 @@ pub mod spc_manifest {
         #[test]
         fn manifest_rejects_body_count_mismatch() {
             let m = SpcManifestJson {
-                version: MANIFEST_VERSION,
+                schema: SPC_MANIFEST_SCHEMA.to_string(),
                 unknown1: "00".repeat(UNKNOWN1_LEN),
                 unknown2: 0,
                 entries: vec![SpcEntryJson {
@@ -1108,6 +1193,30 @@ pub mod spc_manifest {
                     compression: SpcCompressionJson::Stored,
                     unknown_flag: 0,
                 }],
+            };
+            assert!(m.into_spc(vec![]).is_err());
+        }
+
+        #[test]
+        fn manifest_rejects_unknown_key() {
+            // deny_unknown_fields: a stray key is a hard error, not silently dropped.
+            let json = r#"{
+                "schema": "drv3-spc/v1",
+                "unknown1": "00",
+                "unknown2": 0,
+                "entries": [],
+                "typo_field": 1
+            }"#;
+            assert!(serde_json::from_str::<SpcManifestJson>(json).is_err());
+        }
+
+        #[test]
+        fn manifest_rejects_wrong_schema_tag() {
+            let m = SpcManifestJson {
+                schema: "drv3-spc/v2".to_string(),
+                unknown1: "00".repeat(UNKNOWN1_LEN),
+                unknown2: 0,
+                entries: vec![],
             };
             assert!(m.into_spc(vec![]).is_err());
         }

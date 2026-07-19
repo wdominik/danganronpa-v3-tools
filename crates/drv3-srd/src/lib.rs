@@ -38,6 +38,9 @@
 //! `ResourceInfo` entries inside `$RSI` blocks are exposed verbatim
 //! (`Vec<Vec<u32>>`); resolving the external blobs is a job for the CLI / font
 //! patcher built on top.
+//!
+//! Fallible operations surface [`drv3_binio::BinResult`] directly; this crate
+//! defines no error type of its own.
 
 // Several SRD field names (`unknown_10`, `unknown_1a`, `unknown_1d`,
 // `unknown_4`) are deliberately named after the byte offset they sit at in
@@ -52,10 +55,10 @@ use bitflags::bitflags;
 
 use drv3_binio::{BinError, BinResult, Reader, Writer};
 
-pub const MAGIC_CFH: &[u8; 4] = b"$CFH";
-pub const MAGIC_CT0: &[u8; 4] = b"$CT0";
-pub const MAGIC_TXR: &[u8; 4] = b"$TXR";
-pub const MAGIC_RSI: &[u8; 4] = b"$RSI";
+const MAGIC_CFH: &[u8; 4] = b"$CFH";
+const MAGIC_CT0: &[u8; 4] = b"$CT0";
+const MAGIC_TXR: &[u8; 4] = b"$TXR";
+const MAGIC_RSI: &[u8; 4] = b"$RSI";
 
 /// Parsed SRD file (the `.srd` / `.stx` half — sidecars handled by callers).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,7 +112,11 @@ bitflags! {
 }
 
 /// Mask isolating the 29-bit offset portion of `ResourceInfo[0]`.
-pub const RESOURCE_OFFSET_MASK: u32 = 0x1FFF_FFFF;
+#[allow(
+    dead_code,
+    reason = "named format constant exercised by the resource-location test"
+)]
+pub(crate) const RESOURCE_OFFSET_MASK: u32 = 0x1FFF_FFFF;
 
 /// `$RSI` payload — opaque metadata around an inline `ResourceData` blob and a
 /// trailing string list.
@@ -594,5 +601,34 @@ mod tests {
             ResourceLocationFlags::SRDV.bits()
         );
         assert_eq!(value & RESOURCE_OFFSET_MASK, 0x1234);
+    }
+
+    #[test]
+    fn truncated_block_header_errors_without_panic() {
+        // A buffer shorter than a 16-byte block header must error, not panic.
+        assert!(Srd::parse(b"$CF").is_err());
+        assert!(Srd::parse(b"$CFH\x00\x00").is_err());
+    }
+
+    #[test]
+    fn oversized_data_size_errors_without_panic() {
+        // A block header claiming more `data` than the buffer holds.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"$CFH");
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // data_size
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // subdata_size
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // unknown_0c
+        assert!(Srd::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn oversized_subdata_size_errors_without_panic() {
+        // Zero data but a `subdata` size far past the end of the buffer.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"$CFH");
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // data_size
+        bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // subdata_size
+        bytes.extend_from_slice(&0u32.to_be_bytes()); // unknown_0c
+        assert!(Srd::parse(&bytes).is_err());
     }
 }

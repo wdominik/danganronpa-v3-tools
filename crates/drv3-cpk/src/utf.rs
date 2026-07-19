@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use drv3_binio::{BinError, BinResult, Reader, Writer};
 use indexmap::IndexMap;
 
-pub const MAGIC: &[u8; 4] = b"@UTF";
+const MAGIC: &[u8; 4] = b"@UTF";
 
 /// Storage class for an `@UTF` column, derived from `flags & 0xF0`.
 ///
@@ -93,7 +93,8 @@ impl StorageFlag {
         }
     }
 
-    /// The 8-bit storage component (top nibble worth of bits).
+    /// The storage selector encoded in bits 4-6 of the flag byte, returned as
+    /// the raw byte value (`0x00` / `0x10` / `0x30` / `0x50` / `0x70`).
     pub fn storage_bits(self) -> u8 {
         match self {
             Self::None => 0x00,
@@ -210,6 +211,7 @@ pub enum UtfValue {
 }
 
 impl UtfValue {
+    /// The [`UtfType`] tag matching this value's variant.
     pub fn ty(&self) -> UtfType {
         match self {
             Self::U8(_) => UtfType::U8,
@@ -227,6 +229,8 @@ impl UtfValue {
         }
     }
 
+    /// The value widened to `u32` if it is an unsigned integer that fits
+    /// (`U8` / `U16` / `U32`), else `None`.
     pub fn as_u32(&self) -> Option<u32> {
         match *self {
             Self::U8(v) => Some(u32::from(v)),
@@ -236,6 +240,8 @@ impl UtfValue {
         }
     }
 
+    /// The value widened to `u64` if it is an unsigned integer
+    /// (`U8` / `U16` / `U32` / `U64`), else `None`.
     pub fn as_u64(&self) -> Option<u64> {
         match *self {
             Self::U8(v) => Some(u64::from(v)),
@@ -246,6 +252,7 @@ impl UtfValue {
         }
     }
 
+    /// The inner string slice if this is a [`UtfValue::String`], else `None`.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::String(s) => Some(s.as_str()),
@@ -329,30 +336,18 @@ impl UtfTable {
         let row_size = r.u16_be()? as usize;
         let row_count = r.u32_be()? as usize;
 
-        let string_pool = &input[strings_offset..data_offset];
-        let data_blob = &input[data_offset..table_end];
+        // A table with no columns is malformed. The row-size sum check below
+        // only rejects a mismatch, so without this a zero-column, zero-row-size
+        // table would pass and spin the row loop `row_count` times.
+        if column_count == 0 {
+            return Err(BinError::malformed(0x18, "@UTF table has zero columns"));
+        }
 
-        let read_pool_string = |off: usize| -> BinResult<String> {
-            if off >= string_pool.len() {
-                return Err(BinError::malformed(
-                    0,
-                    format!(
-                        "string offset {off} past pool ({} bytes)",
-                        string_pool.len()
-                    ),
-                ));
-            }
-            let mut end = off;
-            while end < string_pool.len() && string_pool[end] != 0 {
-                end += 1;
-            }
-            std::str::from_utf8(&string_pool[off..end])
-                .map(str::to_owned)
-                .map_err(|source| BinError::InvalidUtf8 {
-                    pos: strings_offset + off,
-                    source,
-                })
-        };
+        let string_pool = r.subslice(strings_offset, data_offset)?;
+        let data_blob = r.subslice(data_offset, table_end)?;
+
+        let read_pool_string =
+            |off: usize| read_pool_string(string_pool, off, strings_offset + off);
 
         let name = read_pool_string(table_name_offset)?;
 
@@ -408,12 +403,13 @@ impl UtfTable {
 
         // Row data.
         if running_row_offset != row_size {
+            // 0x1E is the header's RowSize field, the value being contradicted.
             return Err(BinError::malformed(
-                0,
+                0x1E,
                 format!("row_size mismatch: schema sum {running_row_offset} vs header {row_size}"),
             ));
         }
-        let mut rows: Vec<UtfRow> = Vec::with_capacity(row_count);
+        let mut rows: Vec<UtfRow> = Vec::with_capacity(r.capacity_hint(row_count, row_size.max(1)));
         for row_index in 0..row_count {
             let row_start = rows_offset + row_index * row_size;
             let mut row: UtfRow = UtfRow::with_capacity(columns.len());
@@ -654,6 +650,28 @@ fn zero_value(ty: UtfType) -> UtfValue {
     }
 }
 
+/// Read a null-terminated UTF-8 string from a `@UTF` string pool at byte
+/// `off`. `err_pos` is the absolute stream position reported on a bounds or
+/// UTF-8 error (the two call sites derive it differently).
+fn read_pool_string(pool: &[u8], off: usize, err_pos: usize) -> BinResult<String> {
+    if off >= pool.len() {
+        return Err(BinError::malformed(
+            err_pos,
+            format!("string offset {off} past pool ({} bytes)", pool.len()),
+        ));
+    }
+    let mut end = off;
+    while end < pool.len() && pool[end] != 0 {
+        end += 1;
+    }
+    std::str::from_utf8(&pool[off..end])
+        .map(str::to_owned)
+        .map_err(|source| BinError::InvalidUtf8 {
+            pos: err_pos,
+            source,
+        })
+}
+
 fn read_typed_value(
     r: &mut Reader<'_>,
     ty: UtfType,
@@ -673,24 +691,7 @@ fn read_typed_value(
         UtfType::F64 => UtfValue::F64(r.f64_be()?),
         UtfType::String => {
             let offset = r.u32_be()? as usize;
-            if offset >= string_pool.len() {
-                return Err(BinError::malformed(
-                    r.position(),
-                    format!("string offset {offset} past pool"),
-                ));
-            }
-            let mut end = offset;
-            while end < string_pool.len() && string_pool[end] != 0 {
-                end += 1;
-            }
-            UtfValue::String(
-                std::str::from_utf8(&string_pool[offset..end])
-                    .map(str::to_owned)
-                    .map_err(|source| BinError::InvalidUtf8 {
-                        pos: r.position(),
-                        source,
-                    })?,
-            )
+            UtfValue::String(read_pool_string(string_pool, offset, r.position())?)
         }
         UtfType::Data => {
             let offset = r.u32_be()? as usize;
@@ -871,6 +872,38 @@ mod tests {
         let parsed = UtfTable::parse(&bytes1).unwrap();
         let bytes2 = parsed.to_bytes().unwrap();
         assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn inverted_string_offset_errors_without_panic() {
+        let mut bytes = sample().to_bytes().unwrap();
+        // strings_offset is the u32 BE at 0x0C; force it past data_offset so
+        // the pool subslice would have start > end.
+        bytes[0x0C..0x10].copy_from_slice(&0xFFFF_FFF0u32.to_be_bytes());
+        assert!(matches!(
+            UtfTable::parse(&bytes),
+            Err(BinError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn zero_column_count_errors() {
+        let mut bytes = sample().to_bytes().unwrap();
+        // column_count is the u16 BE at 0x18.
+        bytes[0x18..0x1A].copy_from_slice(&0u16.to_be_bytes());
+        assert!(matches!(
+            UtfTable::parse(&bytes),
+            Err(BinError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn huge_row_count_does_not_over_allocate() {
+        let mut bytes = sample().to_bytes().unwrap();
+        // row_count is the u32 BE at 0x1C. A hostile count must fail on a
+        // bounded read, not by pre-allocating billions of rows.
+        bytes[0x1C..0x20].copy_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+        assert!(UtfTable::parse(&bytes).is_err());
     }
 
     #[test]

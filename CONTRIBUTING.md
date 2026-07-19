@@ -16,7 +16,7 @@ the official recommendation wins — please open a PR that updates this file.
 
 ## 1. Project shape
 
-The repository is a Cargo workspace with thirteen crates under `crates/`:
+The repository is a Cargo workspace with fourteen crates under `crates/`:
 
 ```
 drv3-binio  ──┬── drv3-compression ── drv3-spc
@@ -28,8 +28,10 @@ drv3-binio  ──┬── drv3-compression ── drv3-spc
               ├── drv3-translate
               └── drv3-wrd
 
-drv3-dto ── serde DTOs over the format crates + drv3-translate
-drv3-cli, drv3-translate-cli ── the two binaries; both depend on drv3-dto
+drv3-dto        ── serde DTOs for the exchange schema, over the format crates
+drv3-dto-patch  ── serde DTOs for the patch schema; over drv3-dto + drv3-translate
+drv3-cli            ── binary; depends on drv3-dto
+drv3-translate-cli  ── binary; depends on drv3-dto-patch
 ```
 
 - **Format crates** (`drv3-cpk`, `drv3-dat`, `drv3-spc`, `drv3-spft`,
@@ -41,12 +43,14 @@ drv3-cli, drv3-translate-cli ── the two binaries; both depend on drv3-dto
   consumes the format crates (`drv3-cpk`, `drv3-spc`, `drv3-spft`,
   `drv3-srd`, `drv3-stx`) and applies translation patches to parsed
   CPKs in memory.
-- **`drv3-dto`** is the serde layer: it owns both JSON schemas — the
-  dump/build/extract-pack exchange DTOs and the translation-patch schema —
-  and converts between them and the plain library types. Every other library
-  crate stays serde-free.
-- **`drv3-cli`** and **`drv3-translate-cli`** are the two binaries; both
-  depend on `drv3-dto` for their JSON.
+- **`drv3-dto`** is the serde layer for the **exchange** schema — the
+  dump/build/extract-pack DTOs and the CPK/SPC manifests — converting them to
+  and from the plain library types. Every format library crate stays serde-free.
+- **`drv3-dto-patch`** is the serde layer for the **translation-patch**
+  schema. It depends on `drv3-dto` for the shared glyph-geometry DTOs and on
+  `drv3-translate` for the model types it converts into.
+- **`drv3-cli`** (which depends on `drv3-dto`) and **`drv3-translate-cli`**
+  (which depends on `drv3-dto-patch`) are the two binaries.
 
 Each crate's `lib.rs` opens with a module-level `//!` doc comment that
 describes the format's on-disk layout. **Read that header before touching
@@ -78,9 +82,7 @@ and never reference either document directly (see §8).
   cargo doc --workspace --no-deps
   ```
 
-  All four must pass. These same commands run on every push and PR via
-  [`.github/workflows/ci.yml`](.github/workflows/ci.yml); CI green is
-  the canonical merge signal.
+  All four must pass before a change is considered ready.
 
 ---
 
@@ -202,8 +204,16 @@ use crate::utf::{StorageFlag, UtfTable};
   The simpler format crates (`drv3-dat`, `drv3-spft`, `drv3-srd`,
   `drv3-stx`, `drv3-wrd`) introduce no error states of their own — they
   propagate `drv3_binio::{BinError, BinResult}` directly and don't depend
-  on `thiserror`.
+  on `thiserror`. Their module headers say so, so a reader knows the crate
+  adds no error type.
 
+- **Every format `to_bytes` returns a `Result`.** Encoders narrow in-memory
+  lengths and offsets into fixed-width on-disk fields, so they can fail on a
+  value too large to represent; the check is `u32::try_from(…)`, never a
+  silent `as` truncation. Leaf crates return `BinResult`; `drv3-cpk` /
+  `drv3-spc` return their own crate `Result`. This is distinct from the
+  writer self-consistency checks below — the `Result` guards representable
+  size limits, `debug_assert!` guards planner bugs.
 - **Binaries** (`drv3-cli`) use `anyhow::Result` at the handler boundary.
   Library errors propagate naturally via `?`; use `.with_context(|| …)`
   to add path or operation context.
@@ -472,7 +482,7 @@ cast_lossless = "allow"
 |---|---|
 | `module_name_repetitions` | Format-derived type names like `StxTable` / `CpkFile` repeat the crate name on purpose — readability at call sites wins over deduplication. |
 | `must_use_candidate` | Pedantic wants `#[must_use]` on every pure value-returning function. For dozens of tiny accessors (`UtfValue::ty()`, `has_name()`) the annotation is rote noise. |
-| `cast_possible_truncation`, `cast_sign_loss`, `cast_lossless` | The codebase has ~160 numeric casts driven by format specifications (`u32 ↔ usize` for offsets, `u64 ↔ u32` for sizes). Most are correct by construction, not by accident. A future audit may tighten this; for now the cost outweighs the safety win. |
+| `cast_possible_truncation`, `cast_sign_loss`, `cast_lossless` | The codebase has ~160 numeric casts driven by format specifications (`u32 ↔ usize` for offsets, `u64 ↔ u32` for sizes). Most are correct by construction, not by accident. A future pass may tighten this; for now the cost outweighs the safety win. |
 
 **New casts** should not lean on the workspace allow. Because these lints
 are `allow`ed workspace-wide, the compiler won't flag a new unannotated
@@ -583,7 +593,7 @@ round-trip**: `write(parse(bytes)) == bytes`.
   ```
 
 - **Synthetic round-trip tests** in unit-test modules. These exercise the
-  code path in CI without needing the full ~23 GB of game archives on disk.
+  code path without needing the full ~23 GB of game archives on disk.
 
 ### Bit-equal vs. semantic
 
@@ -622,8 +632,8 @@ are two views of the same understanding.
   fact must also live in the code's comments in plain prose.
 - **Docs may reference the code** for implementation specifics, since
   the docs are written for humans browsing the project. The JSON
-  schemas in `docs/json-schemas.md` point at the `drv3-dto` crate
-  (`src/lib.rs` for the exchange DTOs, `src/patch.rs` for the patch schema)
+  schemas in `docs/json-schemas.md` point at `drv3-dto/src/lib.rs` for the
+  exchange DTOs and `drv3-dto-patch/src/lib.rs` for the patch schema
   as their authoritative source; the binary-format reference points
   at the per-crate `lib.rs` module headers.
 

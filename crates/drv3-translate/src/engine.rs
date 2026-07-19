@@ -62,6 +62,15 @@ pub fn apply(
         by_cpk.entry(group.cpk.as_str()).or_default().push(group);
     }
 
+    // Reject duplicate CPK names: patching the same name twice would apply
+    // the same file groups to each handle and double-count the report.
+    let mut seen: HashSet<&str> = HashSet::new();
+    for (name, _) in cpks.iter() {
+        if !seen.insert(*name) {
+            return Err(TranslateError::DuplicateCpk((*name).to_string()));
+        }
+    }
+
     // Surface unknown CPK names eagerly — failing fast beats silently
     // dropping half the translation set.
     let known: HashSet<&str> = cpks.iter().map(|(n, _)| *n).collect();
@@ -102,6 +111,12 @@ fn apply_to_cpk(
     for g in groups {
         by_path.entry(g.cpk_path.as_str()).or_default().push(*g);
     }
+    // Iterate in sorted cpk_path order so the resulting `work` / `missing`
+    // (and the report's within-CPK drift/missing sequences) are reproducible
+    // run to run — HashMap iteration order is not. Sequential and parallel
+    // dispatch consume this same ordered `work`, so byte output is unaffected.
+    let mut by_path: Vec<(&str, Vec<&TranslationFileGroup>)> = by_path.into_iter().collect();
+    by_path.sort_by_key(|(cpk_path, _)| *cpk_path);
 
     // Resolve which CPK file each cpk_path maps to (or record as missing),
     // then dispatch the actual SPC patching either sequentially or in
@@ -164,7 +179,9 @@ fn apply_to_cpk(
 /// Hand out one `&mut T` per index in `work`, returned in the same order
 /// as `work`. Indices must be unique and in-bounds — both are guaranteed
 /// by the caller (each `work` index comes from a `HashMap<cpk_path, …>`
-/// lookup into `cpk.files`).
+/// lookup into `cpk.files`). `split_at_mut` doesn't apply: the requested
+/// indices are arbitrary and non-contiguous, so we walk the slice once and
+/// bucket each requested element into its output position.
 fn collect_disjoint_mut<'a, T>(
     slice: &'a mut [T],
     work: &[(usize, &str, Vec<&TranslationFileGroup>)],
@@ -183,6 +200,8 @@ fn collect_disjoint_mut<'a, T>(
         }
     }
     out.into_iter()
+        // invariant: every slot is `Some` — each `work` index is unique and
+        // in-bounds, so the single slice pass above filled all `work.len()` of them.
         .map(|o| o.expect("every work entry resolved to a slice index"))
         .collect()
 }
@@ -345,12 +364,19 @@ fn patch_stx_member(
 
         if table.entries[entry_idx].text == patch.target {
             report.already_translated += 1;
+        } else {
+            // Only copy when the text actually differs — skip the redundant
+            // clone for entries that are already at the target translation.
+            table.entries[entry_idx].text.clone_from(&patch.target);
         }
-        table.entries[entry_idx].text.clone_from(&patch.target);
         report.applied += 1;
     }
 
-    spc_entry.data = stx.to_bytes();
+    spc_entry.data = stx.to_bytes().map_err(|e| TranslateError::Stx {
+        cpk_path: cpk_path.to_string(),
+        spc_member: spc_member.to_string(),
+        source: e,
+    })?;
     Ok(())
 }
 
@@ -389,7 +415,7 @@ mod tests {
                 ],
             }],
         };
-        stx.to_bytes()
+        stx.to_bytes().unwrap()
     }
 
     fn make_patch(table: u32, index: u32, src: &str, tgt: &str) -> StxEntryPatch {

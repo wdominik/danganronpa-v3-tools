@@ -30,6 +30,9 @@
 //!
 //! Float columns use bitwise equality for [`PartialEq`] — `NaN`s round-trip
 //! but compare unequal as in standard Rust.
+//!
+//! Fallible operations surface [`drv3_binio::BinResult`] directly; this crate
+//! defines no error type of its own.
 
 use std::collections::HashMap;
 
@@ -246,6 +249,21 @@ impl Dat {
             })?;
             schema.push(Column { name, ty, count });
         }
+
+        // The declared row stride must equal the summed column widths;
+        // otherwise the row reader (which advances per column) would drift out
+        // of step with the pools located via `row_count * bytes_per_row`.
+        let schema_width: usize = schema
+            .iter()
+            .map(|c| c.ty.value_width() * c.count as usize)
+            .sum();
+        if schema_width != bytes_per_row as usize {
+            return Err(BinError::malformed(
+                4,
+                format!("bytes_per_row {bytes_per_row} disagrees with schema width {schema_width}"),
+            ));
+        }
+
         r.align_to(16)?;
 
         let row_data_pos = r.position();
@@ -257,12 +275,12 @@ impl Dat {
         r.seek(row_data_end)?;
         let utf8_count = r.u16_le()? as usize;
         let utf16_count = r.u16_le()? as usize;
-        let mut utf8_pool: Vec<String> = Vec::with_capacity(utf8_count);
+        let mut utf8_pool: Vec<String> = Vec::with_capacity(r.capacity_hint(utf8_count, 1));
         for _ in 0..utf8_count {
             utf8_pool.push(r.read_utf8_cstring()?);
         }
         r.align_to(2)?;
-        let mut utf16_pool: Vec<String> = Vec::with_capacity(utf16_count);
+        let mut utf16_pool: Vec<String> = Vec::with_capacity(r.capacity_hint(utf16_count, 2));
         for _ in 0..utf16_count {
             utf16_pool.push(r.read_utf16le_cstring()?);
         }
@@ -589,6 +607,18 @@ mod tests {
         // Wrong cell type for column 0 (declared U32).
         dat.rows[0][0] = Cell::U8(vec![1]);
         let err = dat.to_bytes().unwrap_err();
+        assert!(matches!(err, BinError::Malformed { .. }));
+    }
+
+    #[test]
+    fn bytes_per_row_disagreeing_with_schema_errors() {
+        let mut bytes = sample().to_bytes().unwrap();
+        // bytes_per_row is the u32 LE at offset 0x04. Bumping it by one keeps
+        // it in the plausible range but no longer matches the summed column
+        // widths, which must be rejected rather than silently misparsed.
+        let real = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        bytes[4..8].copy_from_slice(&(real + 1).to_le_bytes());
+        let err = Dat::parse(&bytes).unwrap_err();
         assert!(matches!(err, BinError::Malformed { .. }));
     }
 

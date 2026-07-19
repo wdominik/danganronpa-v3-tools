@@ -87,35 +87,25 @@ fn partition_resident_round_trips() {
         .get("ContentOffset")
         .and_then(UtfValue::as_u64)
         .expect("ContentOffset column present");
-    let toc_offset = reparsed
-        .header_row
-        .get("TocOffset")
-        .and_then(UtfValue::as_u64)
-        .expect("TocOffset column present");
     let sorted = reparsed
         .header_row
         .get("Sorted")
         .and_then(UtfValue::as_u64)
         .unwrap_or(1);
     if sorted != 0 {
-        // We re-derive offsets from the parsed TOC so the assertion isn't a
-        // tautology over the path we just used to populate `files`.
-        for file in &reparsed.files {
-            // `Cpk::parse` consumes FileOffset internally; the per-file
-            // absolute position is `content_offset + (data position)` and
-            // since the data is owned in `file.data` we can't recover it
-            // directly. Use the layout instead: each preceding file's body
-            // plus per-file pad must align, so a running cursor reflecting
-            // that gives the same answer the writer used.
-            //
-            // Simpler check: read the raw bytes at content_offset and assert
-            // the first file's data prefix matches the first file's body.
-            // The exhaustive offset check is in the unit test
-            // `each_file_body_is_align_padded_when_sorted`; here we just
-            // sanity-check the writer didn't regress on a real input.
-            let _ = file;
+        // Real-data spot-check: ContentOffset is Align-aligned and the first
+        // file's body actually sits at ContentOffset in the serialized bytes.
+        // The exhaustive per-file offset invariant is covered by the
+        // `each_file_body_is_align_padded_when_sorted` unit test.
+        assert_eq!(content_offset % align, 0, "ContentOffset not Align-aligned");
+        if let Some(first) = reparsed.files.first() {
+            let start = content_offset as usize;
+            assert_eq!(
+                &written[start..start + first.data.len()],
+                &first.data[..],
+                "first file body not at ContentOffset",
+            );
         }
-        let _ = (toc_offset, content_offset, align);
     }
 
     // Header preservation: the fields the writer doesn't touch survive.

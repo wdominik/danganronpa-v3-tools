@@ -1,6 +1,6 @@
 //! Danganronpa V3 SPC archive reader/writer.
 //!
-//! SPC (`CPS.`) is a Spike-Chunsoft inner archive that bundles together a
+//! SPC (`CPS.`) is a Spike Chunsoft inner archive that bundles together a
 //! few related game-data files — typically the STX / DAT / WRD / SRD
 //! quartet for one scene. The on-disk layout is:
 //!
@@ -32,7 +32,7 @@
 //! out of scope for v0.1 — never observed in DR V3's PC archives.
 //! [`Spc::parse`] returns [`SpcParseError::CmpVariant`] if it encounters one.
 
-use drv3_binio::{BinError, Reader, Writer};
+use drv3_binio::{BinError, BinResult, Reader, Writer};
 use drv3_compression::spc_lzss;
 use thiserror::Error;
 
@@ -98,6 +98,16 @@ impl SpcEntry {
     }
 }
 
+/// Read a signed 32-bit size/length field, rejecting a negative value.
+///
+/// The on-disk fields are `i32`; a negative value is malformed and, if cast
+/// straight to `usize`, would become a near-`usize::MAX` allocation request.
+fn read_size(r: &mut Reader<'_>, field: &str) -> BinResult<usize> {
+    let pos = r.position();
+    let raw = r.i32_le()?;
+    usize::try_from(raw).map_err(|_| BinError::malformed(pos, format!("negative {field}: {raw}")))
+}
+
 impl Spc {
     /// Find a subfile by name (UTF-8 / ASCII), or `None` if absent.
     pub fn entry(&self, name: &str) -> Option<&SpcEntry> {
@@ -161,13 +171,18 @@ impl Spc {
         r.expect_magic(MAGIC_ROOT)?;
         r.skip(0x0C)?;
 
-        let mut entries: Vec<SpcEntry> = Vec::with_capacity(file_count as usize);
+        // Each entry header is at least 32 bytes on disk, so cap the hint; a
+        // hostile `file_count` then fails on a bounded read, not a huge alloc.
+        let mut entries: Vec<SpcEntry> =
+            Vec::with_capacity(r.capacity_hint(file_count as usize, 32));
         for _ in 0..file_count {
             let compression_flag = r.i16_le()?;
             let unknown_flag = r.i16_le()?;
-            let current_size = r.i32_le()? as usize;
-            let original_size = r.i32_le()? as usize;
-            let name_length = r.i32_le()? as usize;
+            // Sizes are stored signed; a negative value is malformed and, cast
+            // straight to `usize`, would become a huge allocation request.
+            let current_size = read_size(&mut r, "current_size")?;
+            let original_size = read_size(&mut r, "original_size")?;
+            let name_length = read_size(&mut r, "name_length")?;
             r.skip(0x10)?;
 
             let name = r.bytes(name_length)?.to_vec();
@@ -180,7 +195,7 @@ impl Spc {
                 .into());
             }
             // Name padding pads `(NameLength + 1)` to a 16-byte boundary.
-            let name_padding = (0x10 - (name_length + 1) % 0x10) % 0x10;
+            let name_padding = drv3_binio::align_up(name_length + 1, 0x10) - (name_length + 1);
             r.skip(name_padding)?;
 
             let raw = r.bytes(current_size)?;
@@ -201,7 +216,7 @@ impl Spc {
                 other => return Err(SpcParseError::UnknownCompressionFlag(other)),
             };
             // Data padding pads `current_size` to a 16-byte boundary.
-            let data_padding = (0x10 - current_size % 0x10) % 0x10;
+            let data_padding = drv3_binio::align_up(current_size, 0x10) - current_size;
             r.skip(data_padding)?;
 
             entries.push(SpcEntry {
@@ -259,11 +274,12 @@ impl Spc {
 
             w.write_bytes(&entry.name);
             w.write_u8(0);
-            let name_padding = (0x10 - (entry.name.len() + 1) % 0x10) % 0x10;
+            let name_len = entry.name.len() + 1;
+            let name_padding = drv3_binio::align_up(name_len, 0x10) - name_len;
             w.write_fill(name_padding, 0);
 
             w.write_bytes(&encoded);
-            let data_padding = (0x10 - encoded.len() % 0x10) % 0x10;
+            let data_padding = drv3_binio::align_up(encoded.len(), 0x10) - encoded.len();
             w.write_fill(data_padding, 0);
         }
 
@@ -350,6 +366,20 @@ mod tests {
         spc.entries[0].compression_flag = 99;
         let err = spc.to_bytes().unwrap_err();
         assert!(matches!(err, SpcParseError::UnknownCompressionFlag(99)));
+    }
+
+    #[test]
+    fn negative_entry_size_errors_without_panic() {
+        let mut bytes = sample().to_bytes().unwrap();
+        // The first entry header begins at 0x50; `original_size` is the i32 LE
+        // at +8 (0x58). A negative value cast to `usize` would previously
+        // become a near-`usize::MAX` allocation request.
+        bytes[0x58..0x5C].copy_from_slice(&(-1i32).to_le_bytes());
+        let err = Spc::parse(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            SpcParseError::Bin(BinError::Malformed { .. })
+        ));
     }
 
     #[test]

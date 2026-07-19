@@ -1,6 +1,6 @@
 //! Danganronpa V3 WRD script reader/writer.
 //!
-//! WRD is a bytecode-script container paired with an STX file: opcodes such
+//! WRD is a byte-code-script container paired with an STX file: opcodes such
 //! as `LOC` reference STX string IDs and `CHN`/`CHR` provide speaker
 //! metadata. The on-disk layout uses a split-endian header (LE counts and
 //! offsets) followed by a big-endian opcode stream:
@@ -16,14 +16,14 @@
 //! offset 0x14   4 bytes   label_names_ptr u32 LE
 //! offset 0x18   4 bytes   parameters_ptr u32 LE
 //! offset 0x1C   4 bytes   strings_ptr u32 LE — 0 when strings live in the paired STX
-//! offset 0x20   …         bytecode stream: bytes alternating between opcode
+//! offset 0x20   …         byte-code stream: bytes alternating between opcode
 //!                         tags (often prefixed by 0x70) and u16 BE arguments
 //! …             …         local-branch table, label offsets, label names,
 //!                         parameters, optional internal-strings table
 //! ```
 //!
 //! Label names and parameters are Pascal-style strings (`u8 length, bytes,
-//! 0x00`). Numeric arguments in the bytecode are *big-endian* even though
+//! 0x00`). Numeric arguments in the byte-code are *big-endian* even though
 //! the header is little-endian — both endians are explicit at every read.
 //!
 //! ## Status
@@ -39,6 +39,21 @@
 //! round-trip and is not embedded; consumers that want decoded argument
 //! semantics can use [`Wrd::iter_dialogue_lines`] for the LOC/CHN/CHR/CHK
 //! subset, or interpret raw arguments themselves.
+//!
+//! ## Known ambiguity
+//!
+//! The argument scanner ends a command's argument list at the next `0x70`
+//! marker byte, so a legitimate big-endian argument whose high byte is `0x70`
+//! would terminate the list one step early and re-interpret its low byte as
+//! the following opcode. Every shipped Danganronpa V3 WRD round-trips
+//! byte-for-byte under this rule, so the case does not arise in practice, but
+//! it is an inherent ambiguity of the reverse-engineered stream (opcode
+//! markers and argument bytes share the same value space) rather than
+//! something the reader can resolve without the per-opcode argument-count
+//! table.
+//!
+//! Fallible operations surface [`drv3_binio::BinResult`] directly; this crate
+//! defines no error type of its own.
 
 use drv3_binio::{BinError, BinResult, Reader, Writer};
 
@@ -114,7 +129,7 @@ impl Wrd {
     /// # Errors
     ///
     /// Returns an error if the header counts/offsets don't fit the
-    /// buffer, the bytecode stream is truncated, a label/parameter
+    /// buffer, the byte-code stream is truncated, a label/parameter
     /// Pascal string is malformed, or a declared offset points past the
     /// end of its section.
     pub fn parse(input: &[u8]) -> BinResult<Self> {
@@ -219,8 +234,9 @@ impl Wrd {
         // then patch header offsets.
         let mut w = Writer::new();
 
-        // Reserve header.
-        w.write_fill(HEADER_SIZE as usize, 0);
+        // Reserve the header; it's back-patched via `patch_slice` once the
+        // section offsets below are known.
+        let header_patch = w.reserve(HEADER_SIZE as usize);
 
         // Byte-code stream.
         for cmd in &self.commands {
@@ -271,20 +287,23 @@ impl Wrd {
             }
         };
 
-        // Patch header.
-        let mut bytes = w.into_inner();
-        bytes[0x00..0x02].copy_from_slice(&string_count.to_le_bytes());
-        bytes[0x02..0x04].copy_from_slice(&(self.label_names.len() as u16).to_le_bytes());
-        bytes[0x04..0x06].copy_from_slice(&(self.parameters.len() as u16).to_le_bytes());
-        bytes[0x06..0x08].copy_from_slice(&(self.local_branches.len() as u16).to_le_bytes());
-        bytes[0x08..0x0C].copy_from_slice(&self.unknown1.to_le_bytes());
-        bytes[0x0C..0x10].copy_from_slice(&local_branch_data_ptr.to_le_bytes());
-        bytes[0x10..0x14].copy_from_slice(&label_offsets_ptr.to_le_bytes());
-        bytes[0x14..0x18].copy_from_slice(&label_names_ptr.to_le_bytes());
-        bytes[0x18..0x1C].copy_from_slice(&parameters_ptr.to_le_bytes());
-        bytes[0x1C..0x20].copy_from_slice(&strings_ptr.to_le_bytes());
+        // Assemble the header and back-patch it through the Writer's patch API
+        // (`patch_slice` validates length/bounds) rather than indexing the raw
+        // buffer.
+        let mut header = [0u8; HEADER_SIZE as usize];
+        header[0x00..0x02].copy_from_slice(&string_count.to_le_bytes());
+        header[0x02..0x04].copy_from_slice(&(self.label_names.len() as u16).to_le_bytes());
+        header[0x04..0x06].copy_from_slice(&(self.parameters.len() as u16).to_le_bytes());
+        header[0x06..0x08].copy_from_slice(&(self.local_branches.len() as u16).to_le_bytes());
+        header[0x08..0x0C].copy_from_slice(&self.unknown1.to_le_bytes());
+        header[0x0C..0x10].copy_from_slice(&local_branch_data_ptr.to_le_bytes());
+        header[0x10..0x14].copy_from_slice(&label_offsets_ptr.to_le_bytes());
+        header[0x14..0x18].copy_from_slice(&label_names_ptr.to_le_bytes());
+        header[0x18..0x1C].copy_from_slice(&parameters_ptr.to_le_bytes());
+        header[0x1C..0x20].copy_from_slice(&strings_ptr.to_le_bytes());
+        w.patch_slice(header_patch, &header)?;
 
-        Ok(bytes)
+        Ok(w.into_inner())
     }
 
     /// Walk the byte-code stream and yield `(speaker, string_id)` pairs for each
@@ -477,5 +496,21 @@ mod tests {
         bytes[HEADER_SIZE as usize] = 0x71; // not 0x70
         let err = Wrd::parse(&bytes).unwrap_err();
         assert!(matches!(err, BinError::Malformed { .. }));
+    }
+
+    #[test]
+    fn truncated_header_errors_without_panic() {
+        // A buffer shorter than the 0x20-byte header must error, not panic.
+        assert!(Wrd::parse(&[0u8; 4]).is_err());
+        assert!(Wrd::parse(&sample().to_bytes().unwrap()[..0x10]).is_err());
+    }
+
+    #[test]
+    fn section_pointer_past_buffer_errors_without_panic() {
+        // Corrupt `label_names_ptr` (header offset 0x14) to point past the end
+        // of the buffer; the seek to it must fail rather than panic.
+        let mut bytes = sample().to_bytes().unwrap();
+        bytes[0x14..0x18].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        assert!(Wrd::parse(&bytes).is_err());
     }
 }

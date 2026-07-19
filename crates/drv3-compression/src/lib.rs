@@ -2,7 +2,7 @@
 //!
 //! Two unrelated codecs:
 //!
-//! - [`spc_lzss`] — custom Spike-Chunsoft byte-oriented LZSS, used inside SPC
+//! - [`spc_lzss`] — custom Spike Chunsoft byte-oriented LZSS, used inside SPC
 //!   archives. Fully implemented; round-trip via [`spc_lzss::compress`] +
 //!   [`spc_lzss::decompress`].
 //! - [`crilayla`] — CRIWARE's per-entry CPK compression (an LZ77 variant

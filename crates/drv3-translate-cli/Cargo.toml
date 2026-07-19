@@ -10,7 +10,7 @@ description = "Command-line front-end for drv3-translate (apply translation JSON
 
 [dependencies]
 drv3-cpk = { workspace = true }
-drv3-dto = { workspace = true }
+drv3-dto-patch = { workspace = true }
 drv3-translate = { workspace = true }
 
 anyhow = { workspace = true }

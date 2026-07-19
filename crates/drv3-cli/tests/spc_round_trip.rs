@@ -67,7 +67,9 @@ fn extract_pack_round_trip_preserves_metadata() {
     // 1. Extract via the CLI.
     let status = Command::new(&drv3)
         .args(["spc", "extract"])
+        .arg("--in")
         .arg(&src)
+        .arg("--out")
         .arg(&extract_dir)
         .status()
         .expect("run drv3-cli spc extract");
@@ -83,7 +85,9 @@ fn extract_pack_round_trip_preserves_metadata() {
     // 3. Pack the extracted dir back.
     let status = Command::new(&drv3)
         .args(["spc", "pack"])
+        .arg("--in")
         .arg(&extract_dir)
+        .arg("--out")
         .arg(&repacked)
         .status()
         .expect("run drv3-cli spc pack");
@@ -138,7 +142,9 @@ fn manifest_json_shape_is_stable() {
 
     let status = Command::new(drv3_binary())
         .args(["spc", "extract"])
+        .arg("--in")
         .arg(&src)
+        .arg("--out")
         .arg(&extract_dir)
         .status()
         .unwrap();
@@ -148,7 +154,7 @@ fn manifest_json_shape_is_stable() {
     let parsed: serde_json::Value = serde_json::from_str(&manifest_str).unwrap();
 
     // Pre-1.0: schema lives at version 1.
-    assert_eq!(parsed["version"], 1);
+    assert_eq!(parsed["schema"], "drv3-spc/v1");
     // `unknown1` is hex-encoded 36 bytes = 72 hex chars.
     assert_eq!(parsed["unknown1"].as_str().unwrap().len(), 0x24 * 2);
     assert_eq!(parsed["entries"].as_array().unwrap().len(), 3);

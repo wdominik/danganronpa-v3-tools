@@ -23,18 +23,20 @@ JSON.
 
 ## Schema-versioning policy
 
-Every manifest carries a `version: 1` field; every translation patch
-carries `schema: "drv3-translate/v1"`. The project is **pre-1.0**: the
-schemas may change in place and the version stays at the current value.
+Every JSON document carries a `schema` string tag naming its format and
+version: `"drv3-stx/v1"`, `"drv3-dat/v1"`, `"drv3-wrd/v1"`,
+`"drv3-spft/v1"`, `"drv3-cpk/v1"` (CPK manifest), `"drv3-spc/v1"` (SPC
+manifest), and `"drv3-translate/v1"` (translation patch). The project is
+**pre-1.0**: the schemas may change in place and the tag stays at `v1`.
 From `1.0.0` onward, breaking schema changes will bump the version and
-introduce a forward-compatible read path. Today, readers reject any
-version other than the one above.
+introduce a forward-compatible read path. Today, readers reject any tag
+other than the current one.
 
 The authoritative source of truth for every field is the corresponding
 DTO module:
 
 - Manifests and format sidecars: [`crates/drv3-dto/src/lib.rs`](../crates/drv3-dto/src/lib.rs).
-- Translation patches: [`crates/drv3-dto/src/patch.rs`](../crates/drv3-dto/src/patch.rs).
+- Translation patches: [`crates/drv3-dto-patch/src/lib.rs`](../crates/drv3-dto-patch/src/lib.rs).
 
 ---
 
@@ -43,12 +45,13 @@ DTO module:
 ### STX
 
 ```sh
-drv3-cli stx dump  input.stx  out.json
-drv3-cli stx build out.json  output.stx
+drv3-cli stx dump  --in input.stx --out out.json
+drv3-cli stx build --in out.json  --out output.stx
 ```
 
 ```json
 {
+  "schema": "drv3-stx/v1",
   "tables": [
     {
       "unknown": 0,
@@ -69,13 +72,14 @@ the string data.
 ### DAT
 
 ```sh
-drv3-cli dat dump  input.dat  out.json
-drv3-cli dat build out.json  output.dat
+drv3-cli dat dump  --in input.dat --out out.json
+drv3-cli dat build --in out.json  --out output.dat
 ```
 
 ```json
 {
-  "schema": [
+  "schema": "drv3-dat/v1",
+  "columns": [
     { "name": "id",       "type": "u32",   "count": 1 },
     { "name": "label",    "type": "utf16", "count": 1 },
     { "name": "values",   "type": "f32",   "count": 4 }
@@ -99,12 +103,13 @@ Cell types are tagged: every cell carries both its `type` and its
 ### WRD
 
 ```sh
-drv3-cli wrd dump  input.wrd  out.json
-drv3-cli wrd build out.json  output.wrd
+drv3-cli wrd dump  --in input.wrd --out out.json
+drv3-cli wrd build --in out.json  --out output.wrd
 ```
 
 ```json
 {
+  "schema": "drv3-wrd/v1",
   "unknown1": 0,
   "external_string_count": 12,
   "commands": [
@@ -113,29 +118,32 @@ drv3-cli wrd build out.json  output.wrd
   "local_branches": [{ "id": 0, "offset": 16 }],
   "label_offsets": [0],
   "label_names": ["start"],
-  "parameters": ["chap0_scene_a"],
-  "internal_strings": null
+  "parameters": ["chap0_scene_a"]
 }
 ```
+
+`internal_strings` is optional — it's omitted from the dump when the WRD
+carries none (rather than emitting `null`).
 
 Opcode bytes and offsets are plain decimal in the JSON (JSON has no
 hex literal syntax). `opcode: 75` is `0x4B` — the `LOC` opcode in the
 WRD spec.
 
-The `dialogue` subcommand (`drv3-cli wrd dialogue input.wrd`)
-prints the `(speaker, string_id)` pairs the bytecode references —
+The `dialogue` subcommand (`drv3-cli wrd dialogue --in input.wrd`)
+prints the `(speaker, string_id)` pairs the byte-code references —
 useful for cross-referencing STX strings with their on-screen
 speaker.
 
 ### SpFt
 
 ```sh
-drv3-cli spft dump  input.spft  out.json
-drv3-cli spft build out.json  output.spft
+drv3-cli spft dump  --in input.spft --out out.json
+drv3-cli spft build --in out.json   --out output.spft
 ```
 
 ```json
 {
+  "schema": "drv3-spft/v1",
   "unknown6": 6,
   "bit_flag_count": 65375,
   "scale_flag": 1,
@@ -170,12 +178,12 @@ bodies; `cpk pack` reads it back.
 
 ```json
 {
-  "version": 1,
+  "schema": "drv3-cpk/v1",
   "header": {
     "columns": [
-      { "name": "UpdateDateTime", "storage": "PerRow", "type": "u64" },
-      { "name": "Align",          "storage": "PerRow", "type": "u16" },
-      { "name": "Tvers",          "storage": "Constant", "type": "string",
+      { "name": "UpdateDateTime", "storage": "per_row", "type": "u64" },
+      { "name": "Align",          "storage": "per_row", "type": "u16" },
+      { "name": "Tvers",          "storage": "constant", "type": "string",
         "constant": { "string": "CPKMC2.18.04" } }
     ],
     "row": {
@@ -185,13 +193,13 @@ bodies; `cpk pack` reads it back.
     }
   },
   "toc_columns": [
-    { "name": "DirName",     "storage": "PerRow", "type": "string" },
-    { "name": "FileName",    "storage": "PerRow", "type": "string" },
-    { "name": "FileSize",    "storage": "PerRow", "type": "u32" },
-    { "name": "ExtractSize", "storage": "PerRow", "type": "u32" },
-    { "name": "FileOffset",  "storage": "PerRow", "type": "u64" },
-    { "name": "ID",          "storage": "PerRow", "type": "u32" },
-    { "name": "UserString",  "storage": "PerRow", "type": "string" }
+    { "name": "DirName",     "storage": "per_row", "type": "string" },
+    { "name": "FileName",    "storage": "per_row", "type": "string" },
+    { "name": "FileSize",    "storage": "per_row", "type": "u32" },
+    { "name": "ExtractSize", "storage": "per_row", "type": "u32" },
+    { "name": "FileOffset",  "storage": "per_row", "type": "u64" },
+    { "name": "ID",          "storage": "per_row", "type": "u32" },
+    { "name": "UserString",  "storage": "per_row", "type": "string" }
   ],
   "files": [
     { "path": "boot/movie_logo.mp4", "id": 0, "user_string": "" },
@@ -203,8 +211,8 @@ bodies; `cpk pack` reads it back.
 
 Notes:
 
-- `storage` is one of `None` / `Zero` / `Constant` / `PerRow` /
-  `Constant2`; `type` is one of `u8` / `u16` / `u32` / `u64` /
+- `storage` is one of `none` / `zero` / `constant` / `per_row` /
+  `constant2`; `type` is one of `u8` / `u16` / `u32` / `u64` /
   `s8` / `s16` / `s32` / `s64` / `f32` / `f64` / `string` / `data`.
 - Values are tagged objects so they round-trip through `UtfValue`
   without precision loss: `{"u64": 1}`, `{"string": "foo"}`,
@@ -233,7 +241,7 @@ naive "alphabetical sort + force-stored" packer would lose.
 
 ```json
 {
-  "version": 1,
+  "schema": "drv3-spc/v1",
   "unknown1": "cafebabe0000000000000000000000000000000000000000000000000000000000000000",
   "unknown2": 3735928559,
   "entries": [
@@ -248,7 +256,7 @@ Notes:
 - `unknown1` is exactly 36 bytes, hex-encoded (72 chars). Decoded
   to anything else is an error.
 - `compression` is `"stored"` (uncompressed body on disk) or
-  `"lzss"` (Spike-Chunsoft LZSS). The pack reproduces the
+  `"lzss"` (Spike Chunsoft LZSS). The pack reproduces the
   original flag exactly; `lzss` entries are re-compressed by our
   encoder, which is non-deterministic — the compressed bytes need
   not match the original encoder byte-for-byte, but the decoded
@@ -286,7 +294,7 @@ single in-memory translation set before the engine runs.
 | `schema` | `string` | yes | Must equal `"drv3-translate/v1"`. Any other value is a hard error. |
 | `source_language` | `string` | no | Free-form. When multiple JSONs are loaded, the first non-empty value wins. |
 | `target_language` | `string` | no | Same merge rule. |
-| `created_at` | `string` | no | Accepted-and-ignored — audit trail for translators. |
+| `created_at` | `string` | no | Accepted-and-ignored — a record for translators. |
 | `title` | `string` | no | Accepted-and-ignored. |
 | `files` | array of file groups | yes | See below. Order is preserved so duplicate-detection messages can point at the original position. |
 
@@ -425,6 +433,23 @@ Each glyph:
 Unknown keys in a glyph object are rejected (so a stale `png` field is a
 hard error rather than a silently-dropped image reference).
 
+### `apply` / `validate` options
+
+Beyond `--json` / `--cpk` / `--out`, the CLI accepts:
+
+| Flag | Command | Behavior |
+|---|---|---|
+| `--mode repack` *(default)* | `apply` | Write each input CPK back out as a new CPK at `<out>/<cpk_name>`. |
+| `--mode extract` | `apply` | Extract every input CPK into one merged directory tree under `<out>` (last `--cpk` wins on path collisions). |
+| `--on-drift <policy>` | `apply` | Drift handling; see **Drift policy** below. |
+| `--report <path>` | `apply` | Write the JSON run report; see **Report file** below. |
+| `--threads <n>` | `apply` | rayon worker-thread count; `0` *(default)* uses the logical CPU count. |
+
+`validate` is a read-only pre-flight (no `--out`): it loads the JSONs and,
+when `--cpk` is supplied, dry-runs the drift check. It **exits nonzero** if it
+finds any drift event or missing slot, so it can gate a script; with no `--cpk`
+it only checks the JSON schema.
+
 ### Drift policy
 
 The engine compares the JSON's `source` field against the on-disk STX
@@ -439,7 +464,7 @@ library's `DriftPolicy`:
 
 ### Validation rules
 
-Loaded by [`merge_docs`](../crates/drv3-dto/src/patch.rs):
+Loaded by [`merge_docs`](../crates/drv3-dto-patch/src/lib.rs):
 
 - **Duplicate slot**: the same `(cpk, cpk_path, spc_member, table, index)` 5-tuple appearing more than once *across all loaded JSONs* is rejected. Guards against accidentally combining translations that disagree.
 - **Duplicate codepoint**: the same `codepoint` appearing more than once within a single font group is rejected.

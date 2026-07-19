@@ -60,6 +60,14 @@ const TXR_FORMAT_ARGB8888: u8 = 0x01;
 
 const SPFT_MAGIC: &[u8; 4] = b"SpFt";
 
+/// BC4 compresses the atlas in 4×4-pixel blocks, 8 bytes per block.
+const BC4_BLOCK_DIM: usize = 4;
+const BC4_BYTES_PER_BLOCK: usize = 8;
+/// ARGB8888 stores four bytes (A, R, G, B) per pixel.
+const ARGB_BYTES_PER_PIXEL: usize = 4;
+/// `$RSI` `ResourceInfo` slot holding a resource's byte size (`Value[1]`).
+const RSI_RESOURCE_SIZE_SLOT: usize = 1;
+
 pub(crate) fn patch_font_member(
     spc: &mut Spc,
     member_idx: usize,
@@ -96,7 +104,11 @@ pub(crate) fn patch_font_member(
 
     // Re-serialize SPFT and put back into the SRD before we move on
     // to the atlas (the .stx write happens after atlas writes complete).
-    let new_resource_data = spft.to_bytes();
+    let new_resource_data = spft.to_bytes().map_err(|e| TranslateError::Spft {
+        cpk_path: cpk_path.to_string(),
+        spc_member: spc_member.to_string(),
+        source: e,
+    })?;
     *rsi_resource_data_mut(&mut srd.blocks, &rsi_path) = new_resource_data;
 
     // ---- Atlas side: grow the atlas (if requested) and blit glyphs
@@ -212,6 +224,8 @@ fn patch_atlas(
         let Some(alpha) = &patch.glyph_alpha8 else {
             continue;
         };
+        // invariant: size is `Some` — `validate_glyph_patch` rejects any glyph
+        // that carries `glyph_alpha8` without a `size`.
         let (w, h) = patch.size.expect("size validated");
         let pos = patch.position.unwrap_or((0, 0));
         blit_alpha8(
@@ -256,8 +270,8 @@ fn patch_atlas(
 /// BC4 byte count for a `width × height` atlas: `scanline × ceil(height /
 /// 4)`, where `scanline = (width / 4) × 8` bytes per 4-px block-row.
 fn bc4_byte_count(width: u16, height: u16) -> usize {
-    let scanline = (usize::from(width) / 4) * 8;
-    scanline * usize::from(height).div_ceil(4)
+    let scanline = (usize::from(width) / BC4_BLOCK_DIM) * BC4_BYTES_PER_BLOCK;
+    scanline * usize::from(height).div_ceil(BC4_BLOCK_DIM)
 }
 
 /// Decode the shipped atlas sidecar into a full-resolution single-channel
@@ -294,7 +308,7 @@ fn decode_atlas_to_alpha8(
             Ok(decode_bc4(sidecar, wz, hz))
         }
         TXR_FORMAT_ARGB8888 => {
-            check(wz * hz * 4)?;
+            check(wz * hz * ARGB_BYTES_PER_PIXEL)?;
             Ok(decode_argb8888_mono(sidecar, wz, hz))
         }
         _ => Err(TranslateError::AtlasUnsupportedFormat {
@@ -324,10 +338,10 @@ fn update_srdv_resource_size(
             continue;
         };
         if first & ResourceLocationFlags::SRDV.bits() != 0 {
-            if entry.len() < 2 {
+            if entry.len() <= RSI_RESOURCE_SIZE_SLOT {
                 continue;
             }
-            entry[1] = new_len_u32;
+            entry[RSI_RESOURCE_SIZE_SLOT] = new_len_u32;
             return Ok(());
         }
     }
@@ -413,12 +427,16 @@ fn find_spft_rsi(blocks: &[Block]) -> Option<RsiPath> {
     None
 }
 
+/// Resolve an [`RsiPath`] to its `$RSI` data. The path was produced by an
+/// earlier block-walk that already confirmed the block types, so the `panic!`
+/// arms below are unreachable-bug guards, not input validation.
 fn rsi_data_mut<'a>(blocks: &'a mut [Block], path: &RsiPath) -> &'a mut RsiData {
     match *path {
         RsiPath::Top(i) => {
             if let Block::Rsi { rsi, .. } = &mut blocks[i] {
                 rsi
             } else {
+                // invariant: RsiPath::Top only ever indexes an $RSI block.
                 panic!("RsiPath::Top points at non-$RSI block")
             }
         }
@@ -427,9 +445,11 @@ fn rsi_data_mut<'a>(blocks: &'a mut [Block], path: &RsiPath) -> &'a mut RsiData 
                 if let Block::Rsi { rsi, .. } = &mut children[j] {
                     rsi
                 } else {
+                    // invariant: RsiPath::InTxr's child index only ever points at $RSI.
                     panic!("RsiPath::InTxr child is not $RSI")
                 }
             } else {
+                // invariant: RsiPath::InTxr's parent index only ever points at $TXR.
                 panic!("RsiPath::InTxr parent is not $TXR")
             }
         }
@@ -457,19 +477,31 @@ fn txr_data_mut(blocks: &mut [Block]) -> Option<&mut TxrData> {
     })
 }
 
-/// `v3_font00.stx` → `v3_font00.srdv`. If `name` doesn't end in `.stx`,
-/// returns `name + ".srdv"` — robust against future producers that
-/// might ship `.srd`-extension members directly.
+/// `v3_font00.stx` → `v3_font00.srdv`. The `.stx` / `.srd` suffix is matched
+/// case-insensitively (so `.STX` maps too) while the stem keeps its original
+/// casing. If `name` has neither suffix it becomes `name + ".srdv"` — robust
+/// against future producers that ship `.srd`-extension members directly.
 fn sidecar_name_for(name: &str) -> String {
-    if let Some(stem) = name.strip_suffix(".stx") {
-        format!("{stem}.srdv")
-    } else if let Some(stem) = name.strip_suffix(".srd") {
-        format!("{stem}.srdv")
+    // `.stx` and `.srd` are both 4 ASCII bytes; compare the tail on raw bytes
+    // so the check is case-insensitive and panic-free on non-ASCII names. When
+    // it matches, `name.len() - 4` is an ASCII (char) boundary, so slicing the
+    // stem is safe and preserves its original casing.
+    let tail = name.as_bytes();
+    let has_font_suffix = tail.len() >= 4
+        && (tail[tail.len() - 4..].eq_ignore_ascii_case(b".stx")
+            || tail[tail.len() - 4..].eq_ignore_ascii_case(b".srd"));
+    if has_font_suffix {
+        format!("{}.srdv", &name[..name.len() - 4])
     } else {
         format!("{name}.srdv")
     }
 }
 
+// Member names are matched exactly (case-sensitive): the patch JSON's
+// `spc_member` and the sidecar name derived by `sidecar_name_for` must equal
+// the on-disk entry name byte-for-byte. DR V3 ships lowercase names, and
+// `sidecar_name_for` preserves the member's casing, so the derived `.srdv`
+// sibling lines up with what the SPC actually carries.
 fn find_member_by_name(spc: &Spc, name: &str) -> Option<usize> {
     spc.entries
         .iter()
@@ -563,7 +595,7 @@ mod tests {
                 },
             ],
         };
-        spft.to_bytes()
+        spft.to_bytes().unwrap()
     }
 
     /// Build a synthetic SRD containing $CFH, $TXR (32×16 atlas, format
@@ -795,6 +827,9 @@ mod tests {
         assert_eq!(sidecar_name_for("v3_font00.stx"), "v3_font00.srdv");
         assert_eq!(sidecar_name_for("font.srd"), "font.srdv");
         assert_eq!(sidecar_name_for("weird"), "weird.srdv");
+        // Suffix match is case-insensitive; the stem keeps its casing.
+        assert_eq!(sidecar_name_for("V3_FONT00.STX"), "V3_FONT00.srdv");
+        assert_eq!(sidecar_name_for("Font.SRD"), "Font.srdv");
     }
 
     // ---- Atlas-growth tests ----

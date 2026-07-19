@@ -20,28 +20,34 @@ pub struct Patch {
 }
 
 impl Writer {
+    /// Create an empty writer.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Create an empty writer with room pre-allocated for `cap` bytes.
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             buf: Vec::with_capacity(cap),
         }
     }
 
+    /// Current length of the stream — also the offset the next write lands at.
     pub fn position(&self) -> usize {
         self.buf.len()
     }
 
+    /// Borrow the bytes written so far.
     pub fn buffer(&self) -> &[u8] {
         &self.buf
     }
 
+    /// Consume the writer and return the underlying byte buffer.
     pub fn into_inner(self) -> Vec<u8> {
         self.buf
     }
 
+    /// Append raw bytes to the end of the stream.
     pub fn write_bytes(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
     }
@@ -52,12 +58,15 @@ impl Writer {
     }
 
     /// Pad the stream up to the next multiple of `alignment` with `fill`.
+    ///
+    /// # Panics
+    ///
+    /// Panics (division by zero) if `alignment` is `0`. Every call site passes
+    /// a non-zero literal.
     pub fn pad_to(&mut self, alignment: usize, fill: u8) {
-        debug_assert!(alignment >= 1);
-        let rem = self.buf.len() % alignment;
-        if rem != 0 {
-            self.write_fill(alignment - rem, fill);
-        }
+        debug_assert!(alignment != 0, "alignment must be non-zero");
+        let padding = crate::align_up(self.buf.len(), alignment) - self.buf.len();
+        self.write_fill(padding, fill);
     }
 
     /// Reserve `len` bytes (zero-filled) and return a [`Patch`] handle.
@@ -67,6 +76,7 @@ impl Writer {
         Patch { pos, len }
     }
 
+    /// Reserve a 4-byte little-endian slot and return its [`Patch`] handle.
     pub fn reserve_u32_le(&mut self) -> Patch {
         self.reserve(4)
     }
@@ -139,6 +149,8 @@ impl Writer {
 macro_rules! write_int {
     ($name:ident, $ty:ty, $method:ident) => {
         impl Writer {
+            /// Append a typed value to the stream in the byte order named by
+            /// the method (`_le` / `_be`).
             pub fn $name(&mut self, value: $ty) {
                 self.write_bytes(&value.$method());
             }

@@ -1,15 +1,22 @@
 //! `drv3-translate validate` — read-only pre-flight: schema, dedup, drift.
 
 use std::collections::HashMap;
+use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use drv3_cpk::Cpk;
 use drv3_translate::{DriftPolicy, PatchOptions, apply};
 
 use crate::ValidateArgs;
-use drv3_dto::patch::{load_doc, merge_docs};
+use drv3_dto_patch::{load_doc, merge_docs};
 
-pub(crate) fn run(args: &ValidateArgs) -> Result<()> {
+/// How many drift / missing records to list before summarizing the remainder.
+const PREVIEW_LIMIT: usize = 10;
+
+/// Run the `validate` pre-flight: load the JSONs, and (if `--cpk` is given)
+/// dry-run the engine to surface drift and missing slots. Returns a nonzero
+/// [`ExitCode`] when any drift or missing slot is found.
+pub(crate) fn run(args: &ValidateArgs) -> Result<ExitCode> {
     eprintln!("loading {} JSON file(s)…", args.json.len());
     let mut docs = Vec::with_capacity(args.json.len());
     for path in &args.json {
@@ -42,7 +49,7 @@ pub(crate) fn run(args: &ValidateArgs) -> Result<()> {
 
     if args.cpk.is_empty() {
         eprintln!("(no --cpk supplied — skipping drift check)");
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     // Drift check by dry-running through the engine in Skip mode against
@@ -88,26 +95,39 @@ pub(crate) fn run(args: &ValidateArgs) -> Result<()> {
         report.font_glyphs_added, report.font_glyphs_changed, report.font_atlas_writes,
     );
     if !report.drift.is_empty() {
-        for d in report.drift.iter().take(10) {
+        for d in report.drift.iter().take(PREVIEW_LIMIT) {
             eprintln!(
                 "  drift @ {}::{}::{} t={} i={}",
                 d.cpk, d.cpk_path, d.spc_member, d.table, d.index
             );
         }
-        if report.drift.len() > 10 {
-            eprintln!("  …and {} more", report.drift.len() - 10);
+        if report.drift.len() > PREVIEW_LIMIT {
+            eprintln!("  …and {} more", report.drift.len() - PREVIEW_LIMIT);
         }
     }
     if !report.missing.is_empty() {
-        for m in report.missing.iter().take(10) {
+        for m in report.missing.iter().take(PREVIEW_LIMIT) {
             eprintln!(
                 "  missing @ {}::{}::{} slot={:?}",
                 m.cpk, m.cpk_path, m.spc_member, m.slot
             );
         }
-        if report.missing.len() > 10 {
-            eprintln!("  …and {} more", report.missing.len() - 10);
+        if report.missing.len() > PREVIEW_LIMIT {
+            eprintln!("  …and {} more", report.missing.len() - PREVIEW_LIMIT);
         }
     }
-    Ok(())
+
+    // Fail as a pre-flight check: any drift or missing slot makes `validate`
+    // exit nonzero so it's usable in scripts. Details were already printed
+    // above; this is just the verdict + exit code.
+    if report.drift.is_empty() && report.missing.is_empty() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!(
+            "validation failed: {} drift event(s), {} missing slot(s)",
+            report.drift.len(),
+            report.missing.len(),
+        );
+        Ok(ExitCode::from(1))
+    }
 }

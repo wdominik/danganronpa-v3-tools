@@ -196,7 +196,9 @@ fn extract_pack_round_trip_via_cli() {
     // 1. Extract via the CLI.
     let extract_status = Command::new(&drv3)
         .args(["cpk", "extract"])
+        .arg("--in")
         .arg(&src_cpk)
+        .arg("--out")
         .arg(&extract_dir)
         .status()
         .expect("run drv3-cli cpk extract");
@@ -211,7 +213,9 @@ fn extract_pack_round_trip_via_cli() {
     // 3. Pack the extracted dir back.
     let pack_status = Command::new(&drv3)
         .args(["cpk", "pack"])
+        .arg("--in")
         .arg(&extract_dir)
+        .arg("--out")
         .arg(&repacked_cpk)
         .status()
         .expect("run drv3-cli cpk pack");
@@ -256,7 +260,9 @@ fn manifest_json_is_valid_and_versioned() {
 
     let status = Command::new(drv3_binary())
         .args(["cpk", "extract"])
+        .arg("--in")
         .arg(&src_cpk)
+        .arg("--out")
         .arg(&extract_dir)
         .status()
         .unwrap();
@@ -264,7 +270,7 @@ fn manifest_json_is_valid_and_versioned() {
 
     let manifest_str = fs::read_to_string(extract_dir.join("manifest.json")).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&manifest_str).unwrap();
-    assert_eq!(parsed["version"], 1);
+    assert_eq!(parsed["schema"], "drv3-cpk/v1");
     assert_eq!(parsed["files"].as_array().unwrap().len(), 3);
     // The first column carries a real schema entry.
     assert!(parsed["header"]["columns"][0]["name"].is_string());

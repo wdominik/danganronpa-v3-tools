@@ -5,13 +5,13 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use drv3_cpk::Cpk;
 use drv3_translate::{PatchOptions, PatchReport, apply};
 use serde::Serialize;
 
 use crate::{ApplyArgs, OutputMode, mmap_file};
-use drv3_dto::patch::{load_doc, merge_docs};
+use drv3_dto_patch::{load_doc, merge_docs};
 
 pub(crate) fn run(args: &ApplyArgs) -> Result<()> {
     if args.threads > 0 {
@@ -140,6 +140,7 @@ fn canonicalize_into_missing(path: &Path) -> PathBuf {
     base
 }
 
+/// Repack each patched CPK back into a new `.cpk` file at `<out>/<name>`.
 fn write_repack(cpks: &[(String, Cpk)], out: &Path) -> Result<()> {
     for (name, cpk) in cpks {
         let dest = out.join(name);
@@ -154,7 +155,7 @@ fn write_repack(cpks: &[(String, Cpk)], out: &Path) -> Result<()> {
 
 /// One file that was overwritten because two input CPKs shipped the same
 /// CPK-relative path. Last-CPK-wins is the resolved policy; the earlier
-/// CPK's bytes are gone but recorded here so the user can audit the run.
+/// CPK's bytes are gone but recorded here so the user can review the run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ExtractCollision {
     /// CPK-relative path of the colliding file (forward-slash, what the
@@ -179,7 +180,7 @@ fn write_extract(cpks: &[(String, Cpk)], out: &Path) -> Result<Vec<ExtractCollis
     for (name, cpk) in cpks {
         eprintln!("extracting {} → {}", name, out.display());
         for file in &cpk.files {
-            let dest = extract_dest(out, &file.dir_name, &file.file_name);
+            let dest = extract_dest(out, &file.dir_name, &file.file_name)?;
             let rel = cpk_relative_path(&file.dir_name, &file.file_name);
             if let Some(prev) = written.get(&dest) {
                 eprintln!("WARN: {rel} overwritten by {name} (was from {prev})");
@@ -201,15 +202,30 @@ fn write_extract(cpks: &[(String, Cpk)], out: &Path) -> Result<Vec<ExtractCollis
 
 /// Compute the on-disk destination of a CPK file under `out`. Split out
 /// so we can unit-test path assembly without touching the filesystem.
-fn extract_dest(out: &Path, dir_name: &str, file_name: &str) -> PathBuf {
+///
+/// Rejects CPK-supplied components that would escape `out`: a crafted archive
+/// can carry `dir_name = "../../x"` or an absolute `file_name` (`/etc/x`,
+/// `C:\x`) — with `PathBuf` the latter *replaces* the whole destination — so
+/// this mirrors the pack-side `split_path` guard (reject `.` / `..` / `\`
+/// segments and a separator-bearing or empty `file_name`).
+fn extract_dest(out: &Path, dir_name: &str, file_name: &str) -> Result<PathBuf> {
     let mut dest = out.to_path_buf();
-    if !dir_name.is_empty() {
-        for component in dir_name.split('/').filter(|c| !c.is_empty()) {
-            dest.push(component);
+    for component in dir_name.split('/').filter(|c| !c.is_empty()) {
+        if component == "." || component == ".." || component.contains('\\') {
+            bail!("archive path {dir_name:?}/{file_name:?} has unsafe component {component:?}");
         }
+        dest.push(component);
+    }
+    if file_name.is_empty()
+        || file_name == "."
+        || file_name == ".."
+        || file_name.contains('/')
+        || file_name.contains('\\')
+    {
+        bail!("archive file name {file_name:?} is not a safe single path component");
     }
     dest.push(file_name);
-    dest
+    Ok(dest)
 }
 
 /// Forward-slash CPK-relative path. Stable across host OSes (so the
@@ -222,6 +238,7 @@ fn cpk_relative_path(dir_name: &str, file_name: &str) -> String {
     }
 }
 
+/// Render a one-line-per-CPK human summary of a completed [`PatchReport`].
 fn summarize_report(report: &PatchReport) -> String {
     let mut by_cpk: HashMap<&str, usize> = HashMap::new();
     for d in &report.drift {
@@ -403,19 +420,30 @@ mod tests {
         let out = Path::new("/tmp/out");
         // Typical case: directory + filename.
         assert_eq!(
-            extract_dest(out, "wrd_script/003", "foo.spc"),
+            extract_dest(out, "wrd_script/003", "foo.spc").unwrap(),
             PathBuf::from("/tmp/out/wrd_script/003/foo.spc"),
         );
         // Root-level file (no directory).
         assert_eq!(
-            extract_dest(out, "", "manifest.bin"),
+            extract_dest(out, "", "manifest.bin").unwrap(),
             PathBuf::from("/tmp/out/manifest.bin"),
         );
         // Filters out leading/trailing/double slashes in dir_name.
         assert_eq!(
-            extract_dest(out, "/a//b/", "c.dat"),
+            extract_dest(out, "/a//b/", "c.dat").unwrap(),
             PathBuf::from("/tmp/out/a/b/c.dat"),
         );
+    }
+
+    #[test]
+    fn extract_dest_rejects_escapes() {
+        let out = Path::new("/tmp/out");
+        assert!(extract_dest(out, "../../etc", "passwd").is_err());
+        assert!(extract_dest(out, "a/../b", "c").is_err());
+        assert!(extract_dest(out, "", "/etc/passwd").is_err());
+        assert!(extract_dest(out, "", "C:\\windows\\x").is_err());
+        assert!(extract_dest(out, "", "sub/evil").is_err());
+        assert!(extract_dest(out, "a\\b", "c").is_err());
     }
 
     #[test]
