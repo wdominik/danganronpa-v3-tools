@@ -25,27 +25,7 @@ pub(crate) fn run(args: &ValidateArgs) -> Result<ExitCode> {
     let set = merge_docs(docs)?;
     eprintln!("schema OK, {} file group(s) parsed", set.files.len());
 
-    let mut stx_entry_count = 0usize;
-    let mut font_glyph_count = 0usize;
-    let mut by_cpk: HashMap<&str, (usize, usize)> = HashMap::new(); // (stx, font) group counts
-    for fg in &set.files {
-        let bucket = by_cpk.entry(fg.cpk.as_str()).or_default();
-        match &fg.format {
-            drv3_translate::FileFormat::Stx(s) => {
-                stx_entry_count += s.entries.len();
-                bucket.0 += 1;
-            }
-            drv3_translate::FileFormat::Font(f) => {
-                font_glyph_count += f.glyphs.len();
-                bucket.1 += 1;
-            }
-            _ => {}
-        }
-    }
-    eprintln!("{stx_entry_count} STX entries, {font_glyph_count} font glyphs across file groups");
-    for (cpk, (stx, font)) in &by_cpk {
-        eprintln!("  {cpk}: {stx} stx groups, {font} font groups");
-    }
+    summarize_parsed_set(&set);
 
     if args.cpk.is_empty() {
         eprintln!("(no --cpk supplied — skipping drift check)");
@@ -91,8 +71,12 @@ pub(crate) fn run(args: &ValidateArgs) -> Result<ExitCode> {
         report.missing.len(),
     );
     eprintln!(
-        "Font: {} glyphs added, {} changed, {} atlas writes",
-        report.font_glyphs_added, report.font_glyphs_changed, report.font_atlas_writes,
+        "Font: {} glyphs added, {} changed, {} removed, {} atlas writes, {} atlas replaces",
+        report.font_glyphs_added,
+        report.font_glyphs_changed,
+        report.font_glyphs_removed,
+        report.font_atlas_writes,
+        report.font_atlas_replaces,
     );
     if !report.drift.is_empty() {
         for d in report.drift.iter().take(PREVIEW_LIMIT) {
@@ -129,5 +113,48 @@ pub(crate) fn run(args: &ValidateArgs) -> Result<ExitCode> {
             report.missing.len(),
         );
         Ok(ExitCode::from(1))
+    }
+}
+
+/// Print the per-CPK breakdown of a parsed translation set.
+///
+/// Font groups are split by patch mode: a `replace` discards the shipped
+/// glyph table and atlas pixels wholesale, which a producer wants to see
+/// *before* running `apply`, not after.
+fn summarize_parsed_set(set: &drv3_translate::TranslationSet) {
+    let mut stx_entry_count = 0usize;
+    let mut font_glyph_count = 0usize;
+    let mut replace_group_count = 0usize;
+    // (stx groups, merge font groups, replace font groups) per CPK.
+    let mut by_cpk: HashMap<&str, (usize, usize, usize)> = HashMap::new();
+    for fg in &set.files {
+        let bucket = by_cpk.entry(fg.cpk.as_str()).or_default();
+        match &fg.format {
+            drv3_translate::FileFormat::Stx(s) => {
+                stx_entry_count += s.entries.len();
+                bucket.0 += 1;
+            }
+            drv3_translate::FileFormat::Font(f) => {
+                font_glyph_count += f.glyphs.len();
+                match f.mode {
+                    drv3_translate::FontPatchMode::Merge { .. } => bucket.1 += 1,
+                    drv3_translate::FontPatchMode::Replace { .. } => {
+                        bucket.2 += 1;
+                        replace_group_count += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    eprintln!("{stx_entry_count} STX entries, {font_glyph_count} font glyphs across file groups");
+    if replace_group_count > 0 {
+        eprintln!(
+            "  {replace_group_count} font group(s) run in replace mode \
+             (shipped glyphs and atlas pixels discarded)"
+        );
+    }
+    for (cpk, (stx, merge, replace)) in &by_cpk {
+        eprintln!("  {cpk}: {stx} stx groups, {merge} font groups (merge), {replace} (replace)");
     }
 }

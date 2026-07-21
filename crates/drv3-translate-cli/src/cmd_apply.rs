@@ -246,7 +246,8 @@ fn summarize_report(report: &PatchReport) -> String {
     }
     let mut s = format!(
         "STX: applied {} (already-translated {}), skipped {}, drift {}, missing {}\n\
-         Font: glyphs added {}, glyphs changed {}, atlas writes {}, atlas grows {}",
+         Font: glyphs added {}, glyphs changed {}, glyphs removed {}, \
+         atlas writes {}, atlas grows {}, atlas replaces {}",
         report.applied,
         report.already_translated,
         report.skipped,
@@ -254,8 +255,10 @@ fn summarize_report(report: &PatchReport) -> String {
         report.missing.len(),
         report.font_glyphs_added,
         report.font_glyphs_changed,
+        report.font_glyphs_removed,
         report.font_atlas_writes,
         report.font_atlas_grows,
+        report.font_atlas_replaces,
     );
     if !by_cpk.is_empty() {
         s.push_str("  (drift by CPK:");
@@ -279,8 +282,10 @@ struct ReportJson<'a> {
     extract_collisions: &'a [ExtractCollision],
     font_glyphs_added: usize,
     font_glyphs_changed: usize,
+    font_glyphs_removed: usize,
     font_atlas_writes: usize,
     font_atlas_grows: usize,
+    font_atlas_replaces: usize,
 }
 
 #[derive(Serialize)]
@@ -336,8 +341,10 @@ impl<'a> ReportJson<'a> {
             extract_collisions,
             font_glyphs_added: r.font_glyphs_added,
             font_glyphs_changed: r.font_glyphs_changed,
+            font_glyphs_removed: r.font_glyphs_removed,
             font_atlas_writes: r.font_atlas_writes,
             font_atlas_grows: r.font_atlas_grows,
+            font_atlas_replaces: r.font_atlas_replaces,
         }
     }
 }
@@ -396,11 +403,14 @@ mod tests {
         };
 
         eprintln!(
-            "smoke report: atlas_grows={} atlas_writes={} glyphs_added={} glyphs_changed={} missing={}",
+            "smoke report: atlas_grows={} atlas_replaces={} atlas_writes={} \
+             glyphs_added={} glyphs_changed={} glyphs_removed={} missing={}",
             report.font_atlas_grows,
+            report.font_atlas_replaces,
             report.font_atlas_writes,
             report.font_glyphs_added,
             report.font_glyphs_changed,
+            report.font_glyphs_removed,
             report.missing.len(),
         );
         assert!(

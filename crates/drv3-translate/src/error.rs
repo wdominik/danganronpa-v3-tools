@@ -133,11 +133,13 @@ pub enum TranslateError {
     },
 
     /// The JSON `atlas` requested a width different from the game's
-    /// existing `$TXR` width. Only height growth is supported (width
-    /// changes would force a full re-encode of every BC4 block-row).
+    /// existing `$TXR` width. Width is locked in **both** patch modes:
+    /// `$TXR.scanline` is deliberately left at the shipped BC4 block-row
+    /// pitch `width*2` (the engine reads it as the upload row stride), so
+    /// only a width-preserving rewrite keeps it valid.
     #[error(
         "atlas width mismatch in {cpk_path}::{spc_member}: JSON requests width {requested} \
-         but game atlas is {current} (only height growth is supported)"
+         but game atlas is {current} (atlas width is locked to the shipped width)"
     )]
     AtlasWidthChange {
         cpk_path: String,
@@ -147,11 +149,12 @@ pub enum TranslateError {
     },
 
     /// The JSON `atlas` requested a height smaller than the game's
-    /// existing `$TXR` height. Shrinking would drop atlas rows that
-    /// existing glyphs may reference.
+    /// existing `$TXR` height. `merge` mode only: shrinking would drop
+    /// atlas rows that surviving glyphs may reference. A `replace` keeps
+    /// nothing, so it accepts any nonzero height.
     #[error(
         "atlas shrink in {cpk_path}::{spc_member}: JSON requests height {requested} \
-         but game atlas is {current} (cannot shrink an atlas)"
+         but game atlas is {current} (cannot shrink an atlas in merge mode — use mode \"replace\")"
     )]
     AtlasShrink {
         cpk_path: String,

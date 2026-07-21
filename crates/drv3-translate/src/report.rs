@@ -46,18 +46,35 @@ pub struct PatchReport {
     /// Glyphs whose codepoint did not previously exist in the SPFT and
     /// were added by the patch (metadata only — see `font_atlas_writes`
     /// for the pixel-side count).
+    ///
+    /// A `replace`-mode group clears the glyph table first, so every one of
+    /// its glyphs counts as added and this equals its glyph count.
     pub font_glyphs_added: usize,
     /// Glyphs whose codepoint already existed in the SPFT and had at
     /// least one metadata field (`position` / `size` / `kerning`)
     /// changed by the patch.
+    ///
+    /// Always `0` for a `replace`-mode group: there is no surviving glyph
+    /// to change.
     pub font_glyphs_changed: usize,
+    /// Glyphs dropped from the SPFT because their font group ran in
+    /// `replace` mode, which discards the shipped glyph table wholesale.
+    /// `merge` never removes a glyph.
+    pub font_glyphs_removed: usize,
     /// Glyphs whose pixel data was blitted into the atlas (BC4-encoded
     /// `.srdv` sidecar). Metadata-only patches don't contribute here.
     pub font_atlas_writes: usize,
     /// Font atlases that were grown in height to fit a taller re-pack
     /// (`$TXR` height + `.srdv` buffer + `$RSI` `ResourceInfo` size all
     /// updated). One increment per font group whose atlas grew.
+    ///
+    /// `merge` mode only. A `replace` rebuilds the atlas rather than
+    /// growing it, so it counts under `font_atlas_replaces` even when its
+    /// declared height exceeds the shipped one.
     pub font_atlas_grows: usize,
+    /// Font atlases rebuilt from a zeroed buffer by a `replace`-mode group,
+    /// discarding every shipped pixel. One increment per font group.
+    pub font_atlas_replaces: usize,
 }
 
 impl PatchReport {
@@ -70,7 +87,9 @@ impl PatchReport {
         self.missing.extend(other.missing);
         self.font_glyphs_added += other.font_glyphs_added;
         self.font_glyphs_changed += other.font_glyphs_changed;
+        self.font_glyphs_removed += other.font_glyphs_removed;
         self.font_atlas_writes += other.font_atlas_writes;
         self.font_atlas_grows += other.font_atlas_grows;
+        self.font_atlas_replaces += other.font_atlas_replaces;
     }
 }

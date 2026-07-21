@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use drv3_translate::{
-    AtlasSpec, FileFormat, FontFileGroup, FontGlyphPatch, StxEntryPatch, StxFileGroup,
-    TranslationFileGroup, TranslationSet,
+    AtlasSpec, FileFormat, FontFileGroup, FontGlyphPatch, FontPatchMode, StxEntryPatch,
+    StxFileGroup, TranslationFileGroup, TranslationSet,
 };
 use serde::Deserialize;
 
@@ -79,13 +79,32 @@ pub struct FontFileGroupJson {
     pub cpk: String,
     pub cpk_path: String,
     pub spc_member: String,
+    /// How this group relates to the shipped font. Required — the two modes
+    /// differ in what they destroy, so there is no safe default to infer.
+    pub mode: FontPatchModeJson,
     #[serde(default)]
     pub font_name: Option<String>,
-    /// Target atlas geometry. When present and taller than the game's
-    /// shipped `$TXR`, the engine grows the BC4 atlas before blitting.
+    /// Target atlas geometry. Optional under `merge` (omit to keep the shipped
+    /// geometry; present and taller grows the atlas before blitting), but
+    /// **required** under `replace`, which rebuilds the atlas from nothing and
+    /// so has no shipped extent to fall back on. Under `replace` the height may
+    /// also shrink.
     #[serde(default)]
     pub atlas: Option<AtlasJson>,
     pub glyphs: Vec<FontGlyphJson>,
+}
+
+/// How a font group relates to the font the game ships. Mirrors
+/// [`drv3_translate::FontPatchMode`], minus the atlas payload — the JSON keeps
+/// `atlas` as a sibling key and [`convert_font_group`] folds the two together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FontPatchModeJson {
+    /// Additive: shipped glyphs and shipped atlas pixels survive.
+    Merge,
+    /// Wholesale recreation: shipped glyph table and atlas pixels are
+    /// discarded, so this group's glyphs are the complete font.
+    Replace,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,22 +112,6 @@ pub struct FontFileGroupJson {
 pub struct AtlasJson {
     pub width: u16,
     pub height: u16,
-    /// Pixel format of the *existing* atlas being patched. Patched atlases are
-    /// always re-emitted uncompressed as ARGB8888 regardless of this value — it
-    /// only names the source encoding. Validated at parse time.
-    pub format: AtlasFormatJson,
-}
-
-/// Source atlas pixel format. Values are texture-format acronyms (matching the
-/// `TXR_FORMAT_*` constants and `binary-formats.md`), so this enum is
-/// intentionally exempt from the `snake_case` convention; the lowercase
-/// spellings are accepted as aliases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub enum AtlasFormatJson {
-    #[serde(rename = "BC4", alias = "bc4")]
-    Bc4,
-    #[serde(rename = "ARGB8888", alias = "argb8888")]
-    Argb8888,
 }
 
 use drv3_dto::glyph::{KerningJson, PositionJson, SizeJson};
@@ -171,6 +174,10 @@ pub fn load_doc(path: &Path) -> Result<(TranslationDocJson, PathBuf)> {
 /// docs, any font glyph codepoint is referenced twice within one font
 /// group, any `char`/`codepoint` pair disagrees, or any glyph's PNG can't
 /// be read.
+///
+/// A `replace`-mode font group has extra requirements, since it rebuilds the
+/// font from nothing: it must declare an `atlas`, list at least one glyph, and
+/// give every glyph a `position`, `size`, `kerning`, and `image_path`.
 pub fn merge_docs(docs: Vec<(TranslationDocJson, PathBuf)>) -> Result<TranslationSet> {
     let mut set = TranslationSet::default();
     let mut stx_seen: std::collections::HashSet<(String, String, String, u32, u32)> =
@@ -235,15 +242,40 @@ fn convert_stx_group(
 }
 
 fn convert_font_group(fg: FontFileGroupJson, base: &Path, set: &mut TranslationSet) -> Result<()> {
-    // Atlas geometry. `format` names the existing atlas we read from — the
-    // shipped BC4 or, when re-applying, ARGB8888. It's validated at parse time
-    // by `AtlasFormatJson` and isn't otherwise consumed here: patched atlases
-    // are always re-emitted uncompressed (ARGB8888) so the anti-aliased edges
-    // survive.
     let atlas = fg.atlas.map(|a| AtlasSpec {
         width: a.width,
         height: a.height,
     });
+
+    // Group-level replace checks run before the glyph loop, which does PNG file
+    // IO — no point decoding a few hundred images only to reject the group.
+    let mode = match fg.mode {
+        FontPatchModeJson::Merge => FontPatchMode::Merge { atlas },
+        FontPatchModeJson::Replace => {
+            let atlas = atlas.ok_or_else(|| {
+                anyhow!(
+                    "font group {}::{}::{} uses mode \"replace\" but has no `atlas` object \
+                     (replace mode rebuilds the atlas from nothing, so it must declare the \
+                     full geometry)",
+                    fg.cpk,
+                    fg.cpk_path,
+                    fg.spc_member,
+                )
+            })?;
+            if fg.glyphs.is_empty() {
+                return Err(anyhow!(
+                    "font group {}::{}::{} uses mode \"replace\" but lists no glyphs \
+                     (replace mode discards the shipped font, so the glyph list is the \
+                     complete font)",
+                    fg.cpk,
+                    fg.cpk_path,
+                    fg.spc_member,
+                ));
+            }
+            FontPatchMode::Replace { atlas }
+        }
+    };
+    let replacing = matches!(fg.mode, FontPatchModeJson::Replace);
 
     let mut codepoints: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut glyphs = Vec::with_capacity(fg.glyphs.len());
@@ -274,6 +306,10 @@ fn convert_font_group(fg: FontFileGroupJson, base: &Path, set: &mut TranslationS
                 }
             }
         }
+        if replacing {
+            check_replace_glyph_complete(&g, &fg.cpk, &fg.cpk_path, &fg.spc_member)?;
+        }
+
         let size = g.size.map(|s| (s.width, s.height));
         // Decode the glyph image to alpha8 if present. The library expects
         // a single-channel buffer of length `size.0 * size.1`.
@@ -297,12 +333,52 @@ fn convert_font_group(fg: FontFileGroupJson, base: &Path, set: &mut TranslationS
         cpk_path: fg.cpk_path,
         spc_member: fg.spc_member,
         format: FileFormat::Font(FontFileGroup {
+            mode,
             font_name: fg.font_name,
-            atlas,
             glyphs,
         }),
     });
     Ok(())
+}
+
+/// Reject a `replace`-mode glyph that omits any of the four fields the mode
+/// requires.
+///
+/// Replace has no shipped glyph to inherit from, so a partial glyph would
+/// silently land at `(0, 0)` with zero size or zero advance. Every missing
+/// field is reported at once — a producer whose renderer omits `kerning`
+/// shouldn't have to rerun once per glyph to discover that.
+fn check_replace_glyph_complete(
+    g: &FontGlyphJson,
+    cpk: &str,
+    cpk_path: &str,
+    spc_member: &str,
+) -> Result<()> {
+    let mut missing = Vec::new();
+    if g.position.is_none() {
+        missing.push("position");
+    }
+    if g.size.is_none() {
+        missing.push("size");
+    }
+    if g.kerning.is_none() {
+        missing.push("kerning");
+    }
+    if g.image_path.is_none() {
+        missing.push("image_path");
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "glyph U+{:04X} in font group {}::{}::{} is missing {} \
+         (replace mode requires position, size, kerning, and image_path on every glyph)",
+        g.codepoint,
+        cpk,
+        cpk_path,
+        spc_member,
+        missing.join(", "),
+    ))
 }
 
 /// Decode a glyph PNG into a single-channel alpha8 buffer.
@@ -349,6 +425,16 @@ mod tests {
         merge_docs(vec![(doc, PathBuf::from("."))])
     }
 
+    /// Parse-error text for a document that should fail at the serde layer.
+    /// Tests assert on the message rather than bare `is_err()`: with `mode`
+    /// now required, an `is_err()` check would keep passing for the wrong
+    /// reason if a fixture ever lost the field.
+    fn parse_err(json: &str) -> String {
+        serde_json::from_str::<TranslationDocJson>(json)
+            .expect_err("expected a parse error")
+            .to_string()
+    }
+
     #[test]
     fn font_glyph_object_shape_maps_to_model_tuples() {
         // Metadata-only glyph (no `image_path`) so the test needs no file IO.
@@ -359,7 +445,8 @@ mod tests {
             "cpk": "a.cpk",
             "cpk_path": "x/y.spc",
             "spc_member": "f.stx",
-            "atlas": { "width": 2048, "height": 200, "format": "BC4" },
+            "mode": "merge",
+            "atlas": { "width": 2048, "height": 200 },
             "glyphs": [{
               "codepoint": 196,
               "char": "Ä",
@@ -374,11 +461,13 @@ mod tests {
             panic!("expected a font group");
         };
         assert_eq!(
-            fg.atlas,
-            Some(AtlasSpec {
-                width: 2048,
-                height: 200
-            })
+            fg.mode,
+            FontPatchMode::Merge {
+                atlas: Some(AtlasSpec {
+                    width: 2048,
+                    height: 200
+                })
+            }
         );
         let g = &fg.glyphs[0];
         assert_eq!(g.codepoint, 196);
@@ -396,6 +485,7 @@ mod tests {
           "schema": "drv3-translate/v1",
           "files": [{
             "format": "font", "cpk": "a", "cpk_path": "b", "spc_member": "c",
+            "mode": "merge",
             "glyphs": [{
               "codepoint": 65,
               "png": "x.png",
@@ -404,7 +494,7 @@ mod tests {
             }]
           }]
         }"#;
-        assert!(serde_json::from_str::<TranslationDocJson>(json).is_err());
+        assert!(parse_err(json).contains("png"));
     }
 
     #[test]
@@ -416,6 +506,7 @@ mod tests {
           "schema": "drv3-translate/v1",
           "files": [{
             "format": "font", "cpk": "a", "cpk_path": "b", "spc_member": "c",
+            "mode": "merge",
             "glyphs": [{
               "codepoint": 65,
               "position": [10, 20],
@@ -423,7 +514,7 @@ mod tests {
             }]
           }]
         }"#;
-        assert!(serde_json::from_str::<TranslationDocJson>(json).is_err());
+        assert!(parse_err(json).contains("sequence"));
     }
 
     #[test]
@@ -435,21 +526,137 @@ mod tests {
           "files": [],
           "flies": []
         }"#;
-        assert!(serde_json::from_str::<TranslationDocJson>(json).is_err());
+        assert!(parse_err(json).contains("flies"));
     }
 
     #[test]
-    fn atlas_rejects_unknown_format() {
-        // The atlas format enum validates at parse time — an unsupported pixel
-        // format is rejected before conversion. (Lowercase aliases still parse.)
+    fn atlas_rejects_leftover_format_key() {
+        // `atlas.format` was dropped from the schema (it named the source
+        // encoding, was validated, then discarded — the engine reads the real
+        // format from $TXR). A document still carrying it must fail loudly
+        // rather than have it silently ignored, so the value here is a
+        // formerly-*valid* one.
         let json = r#"{
           "schema": "drv3-translate/v1",
           "files": [{
             "format": "font", "cpk": "a", "cpk_path": "b", "spc_member": "c",
-            "atlas": { "width": 64, "height": 64, "format": "DXT5" },
+            "mode": "merge",
+            "atlas": { "width": 64, "height": 64, "format": "BC4" },
             "glyphs": []
           }]
         }"#;
-        assert!(serde_json::from_str::<TranslationDocJson>(json).is_err());
+        assert!(parse_err(json).contains("format"));
+    }
+
+    #[test]
+    fn font_group_requires_mode() {
+        let json = r#"{
+          "schema": "drv3-translate/v1",
+          "files": [{
+            "format": "font", "cpk": "a", "cpk_path": "b", "spc_member": "c",
+            "glyphs": []
+          }]
+        }"#;
+        assert!(parse_err(json).contains("mode"));
+    }
+
+    #[test]
+    fn font_group_rejects_unknown_mode() {
+        let json = r#"{
+          "schema": "drv3-translate/v1",
+          "files": [{
+            "format": "font", "cpk": "a", "cpk_path": "b", "spc_member": "c",
+            "mode": "rebuild",
+            "glyphs": []
+          }]
+        }"#;
+        let err = parse_err(json);
+        assert!(err.contains("unknown variant"), "{err}");
+        assert!(err.contains("rebuild"), "{err}");
+    }
+
+    #[test]
+    fn replace_requires_atlas() {
+        // Replace rebuilds the atlas from nothing, so there is no shipped
+        // extent to fall back on.
+        let json = r#"{
+          "schema": "drv3-translate/v1",
+          "files": [{
+            "format": "font", "cpk": "a", "cpk_path": "b", "spc_member": "c",
+            "mode": "replace",
+            "glyphs": [{
+              "codepoint": 65,
+              "image_path": "x.png",
+              "position": { "x": 0, "y": 0 },
+              "size": { "width": 1, "height": 1 },
+              "kerning": { "left": 0, "right": 0, "vertical": 0 }
+            }]
+          }]
+        }"#;
+        let err = parse(json).expect_err("replace without atlas must fail");
+        assert!(err.to_string().contains("atlas"), "{err}");
+    }
+
+    #[test]
+    fn replace_requires_nonempty_glyphs() {
+        // An empty glyph list under replace would erase the font entirely.
+        let json = r#"{
+          "schema": "drv3-translate/v1",
+          "files": [{
+            "format": "font", "cpk": "a", "cpk_path": "b", "spc_member": "c",
+            "mode": "replace",
+            "atlas": { "width": 64, "height": 64 },
+            "glyphs": []
+          }]
+        }"#;
+        let err = parse(json).expect_err("replace with no glyphs must fail");
+        assert!(err.to_string().contains("no glyphs"), "{err}");
+    }
+
+    #[test]
+    fn replace_glyph_requires_all_geometry_fields() {
+        // Missing fields are reported together — a producer whose renderer
+        // omits `kerning` shouldn't have to rerun once per glyph to find out.
+        // This glyph also has no `image_path`, so both must be named.
+        let json = r#"{
+          "schema": "drv3-translate/v1",
+          "files": [{
+            "format": "font", "cpk": "a", "cpk_path": "b", "spc_member": "c",
+            "mode": "replace",
+            "atlas": { "width": 64, "height": 64 },
+            "glyphs": [{
+              "codepoint": 65,
+              "position": { "x": 0, "y": 0 },
+              "size": { "width": 1, "height": 1 }
+            }]
+          }]
+        }"#;
+        let err = parse(json)
+            .expect_err("replace glyph missing geometry must fail")
+            .to_string();
+        assert!(err.contains("kerning"), "{err}");
+        assert!(err.contains("image_path"), "{err}");
+        assert!(err.contains("U+0041"), "{err}");
+    }
+
+    #[test]
+    fn merge_glyph_geometry_stays_optional() {
+        // The counterpart to the replace strictness: merge inherits from the
+        // shipped glyph, so a metadata-only patch is still legal.
+        let json = r#"{
+          "schema": "drv3-translate/v1",
+          "files": [{
+            "format": "font", "cpk": "a", "cpk_path": "b", "spc_member": "c",
+            "mode": "merge",
+            "glyphs": [{ "codepoint": 65, "kerning": { "left": 1, "right": 0, "vertical": 0 } }]
+          }]
+        }"#;
+        let set = parse(json).expect("merge allows a metadata-only glyph");
+        let FileFormat::Font(fg) = &set.files[0].format else {
+            panic!("expected a font group");
+        };
+        assert_eq!(fg.mode, FontPatchMode::Merge { atlas: None });
+        assert_eq!(fg.glyphs[0].position, None);
+        assert_eq!(fg.glyphs[0].size, None);
     }
 }

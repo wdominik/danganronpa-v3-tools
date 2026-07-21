@@ -344,11 +344,19 @@ cargo test -p drv3-cpk -- --ignored real_data
 - **Font-atlas pixel writing happens through `drv3-translate-cli`.**
   Standalone `spft build` only edits SPFT metadata; the atlas pixels
   live in the parallel `.srdv` SPC member and are rewritten by
-  `drv3-translate-cli apply` when a font group carries glyph PNGs. The
-  BC4 re-encoder reproduces the `r0 > r1` ramp mode used by every
-  shipped DR V3 atlas; the rare `r0 < r1` mode is decoded but
-  re-encoded as the equivalent 8-stop linear ramp, which can shift a
-  handful of pixels by a small amount on round-trip.
+  `drv3-translate-cli apply`. A font group patches in one of two modes:
+  `merge` keeps the shipped glyph table and atlas pixels and layers the
+  listed glyphs on top, while `replace` discards both so the listed
+  glyphs become the entire font — the path for a typeface that couldn't
+  be sourced and has to be re-rendered wholesale.
+- **Patched atlases are re-emitted uncompressed.** There is no BC4
+  encoder: the atlas is rebuilt as a full-resolution coverage buffer and
+  written back as ARGB8888 (`$TXR.format` → `0x01`) with the coverage
+  replicated into all four channels, because BC4's block quantization
+  bands anti-aliased glyph edges. `$TXR.scanline` is deliberately left
+  at the shipped BC4 block-row pitch `width*2` — the engine reads it as
+  the upload row stride — which is also why atlas width is locked to the
+  shipped width in both modes.
 - **Only the US Windows release is verified in-engine.** The toolkit
   works on the data from any platform CPK in principle, but JP /
   PS-Vita / PS4 releases may differ in details we haven't seen.

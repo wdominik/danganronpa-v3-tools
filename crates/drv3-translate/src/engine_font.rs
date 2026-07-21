@@ -14,24 +14,39 @@
 //!   through [`drv3_srd::texture`]. When we patch a font we re-emit it as
 //!   uncompressed ARGB8888 (format `0x01`) — see step 5 below.
 //!
+//! # Patch modes
+//!
+//! Every font group declares a [`FontPatchMode`]:
+//!
+//! - **Merge** — additive. The shipped glyph table and shipped atlas pixels
+//!   survive; the group's glyphs are layered on top.
+//! - **Replace** — wholesale recreation, for fonts whose original typeface
+//!   couldn't be sourced. The shipped glyph table is discarded and the atlas
+//!   starts as a zeroed buffer, so the group's glyphs are the entire font.
+//!   Nothing of the shipped font survives, which is why the shipped sidecar is
+//!   never decoded in this mode.
+//!
 //! # Pipeline (per font group)
 //!
 //! 1. Parse the `<name>.stx` SPC member bytes as [`Srd`].
 //! 2. Walk `srd.blocks` for a `$RSI` whose `resource_data` starts with
 //!    `SpFt` magic.
-//! 3. Parse the SPFT, apply metadata edits (`position`, `size`,
-//!    `kerning`), add glyphs for new codepoints.
-//! 4. If the group grows the `atlas` and/or carries glyph pixels: decode
-//!    the shipped atlas (BC4, or ARGB8888 on re-apply) to a full-resolution
-//!    alpha8 coverage buffer, lift it into the (possibly taller) extent with
-//!    new rows zeroed, and copy each glyph's coverage in at full 8-bit
-//!    precision (no BC4 re-encoding — that would band the anti-aliased
-//!    edges). Original glyphs come straight from the decode, untouched.
+//! 3. Parse the SPFT. In replace mode, discard its glyph table first. Then
+//!    apply metadata edits (`position`, `size`, `kerning`) and add glyphs for
+//!    new codepoints — in replace mode every glyph is new by construction.
+//! 4. Build the atlas coverage buffer at the target extent. Merge decodes the
+//!    shipped atlas (BC4, or ARGB8888 on re-apply) to a full-resolution alpha8
+//!    buffer and lifts it into the (possibly taller) extent with new rows
+//!    zeroed; replace starts from all-zero at the declared extent. Then copy
+//!    each glyph's coverage in at full 8-bit precision (no BC4 re-encoding —
+//!    that would band the anti-aliased edges). Under merge, original glyphs
+//!    come straight from the decode, untouched.
 //! 5. Re-emit the whole atlas as uncompressed ARGB8888 into the `<name>.srdv`
 //!    SPC member, and update the `$TXR` format (→ `0x01`) and display height,
 //!    plus the `$RSI` `ResourceInfo` blob size. `$TXR.scanline` is left at the
 //!    shipped BC4 block-row pitch `width*2` (the engine reads it as the upload
-//!    row stride). Every other container field is preserved verbatim.
+//!    row stride) — which is also why atlas width is locked to the shipped
+//!    width in both modes. Every other container field is preserved verbatim.
 //! 6. Re-serialize SPFT → put back into `rsi.resource_data` →
 //!    re-serialize SRD → write back to the `.stx` SPC entry.
 
@@ -43,7 +58,7 @@ use drv3_srd::texture::{blit_alpha8, decode_argb8888_mono, decode_bc4, encode_ar
 use drv3_srd::{Block, ResourceLocationFlags, RsiData, Srd, TxrData};
 
 use crate::error::TranslateError;
-use crate::model::{FontFileGroup, FontGlyphPatch};
+use crate::model::{FontFileGroup, FontGlyphPatch, FontPatchMode};
 use crate::report::PatchReport;
 
 /// BC4 pixel format tag in `$TXR.format` — the format the game ships font
@@ -100,6 +115,20 @@ pub(crate) fn patch_font_member(
         spft.font_name.clone_from(name);
     }
 
+    // Replace mode: drop the shipped glyph table so the group's glyphs are the
+    // complete font. Everything else about the SPFT survives — `unknown6`,
+    // `scale_flag`, and `font_name` are container/engine fields, not content.
+    // `bit_flag_count` also stays at the shipped 0xFF5F even when the
+    // replacement set is smaller: `SpFt::to_bytes` only ever grows it (see
+    // `drv3-spft/src/lib.rs`, `effective_bit_flag_count`), so the flag table
+    // keeps its shipped size. That costs ~8 KB of mostly-zero bytes and is
+    // self-consistent, since the reader only seeks entries whose bit is set.
+    if let FontPatchMode::Replace { .. } = group.mode {
+        report.font_glyphs_removed += spft.glyphs.len();
+        spft.glyphs.clear();
+    }
+
+    // With the table cleared, every glyph below takes the "added" path.
     apply_glyph_metadata(&mut spft, &group.glyphs, report);
 
     // Re-serialize SPFT and put back into the SRD before we move on
@@ -111,9 +140,21 @@ pub(crate) fn patch_font_member(
     })?;
     *rsi_resource_data_mut(&mut srd.blocks, &rsi_path) = new_resource_data;
 
-    // ---- Atlas side: grow the atlas (if requested) and blit glyphs
-    // into the .srdv sidecar SPC member. ----
-    if group.atlas.is_some() || group.glyphs.iter().any(|g| g.glyph_alpha8.is_some()) {
+    // ---- Atlas side: rebuild or grow the atlas and blit glyphs into the
+    // .srdv sidecar SPC member. ----
+    //
+    // Replace mode always runs: its whole point is to discard the shipped
+    // pixels, which requires rewriting the sidecar even if the group carried
+    // no glyph images at all. Don't "simplify" this back to the merge-only
+    // condition — a replace that skipped `patch_atlas` would leave shipped ink
+    // sitting under a replaced glyph table, silently and with no error.
+    let atlas_work = match group.mode {
+        FontPatchMode::Replace { .. } => true,
+        FontPatchMode::Merge { atlas } => {
+            atlas.is_some() || group.glyphs.iter().any(|g| g.glyph_alpha8.is_some())
+        }
+    };
+    if atlas_work {
         patch_atlas(
             spc, &mut srd, &rsi_path, cpk_path, spc_member, group, report,
         )?;
@@ -144,41 +185,14 @@ fn patch_atlas(
     })?;
     let (cur_w, cur_h, fmt) = (txr.display_width, txr.display_height, txr.format);
 
-    // Resolve the target atlas extent: honor a taller `atlas` request,
-    // otherwise fall back to the shipped geometry. Validation of an
-    // `atlas` block happens here even when no growth is needed, so a
-    // bad width/format is reported up front.
-    let (atlas_w, atlas_h) = match &group.atlas {
-        Some(requested) => {
-            // Format is validated in `decode_atlas_to_alpha8` below (it accepts
-            // the shipped BC4 and a re-applied ARGB8888); here we only police
-            // the geometry the producer asked for.
-            if requested.width != cur_w {
-                return Err(TranslateError::AtlasWidthChange {
-                    cpk_path: cpk_path.to_string(),
-                    spc_member: spc_member.to_string(),
-                    requested: requested.width,
-                    current: cur_w,
-                });
-            }
-            if requested.height < cur_h {
-                return Err(TranslateError::AtlasShrink {
-                    cpk_path: cpk_path.to_string(),
-                    spc_member: spc_member.to_string(),
-                    requested: requested.height,
-                    current: cur_h,
-                });
-            }
-            (cur_w, requested.height)
-        }
-        None => (cur_w, cur_h),
-    };
-    let grew = atlas_h > cur_h;
+    let (atlas_w, atlas_h) = target_extent(group.mode, cur_w, cur_h, cpk_path, spc_member)?;
     let any_alpha = group.glyphs.iter().any(|g| g.glyph_alpha8.is_some());
 
-    // Nothing to write into the sidecar: no growth and no pixels. (Reached
-    // when an `atlas` block merely restates the shipped dimensions.)
-    if !grew && !any_alpha {
+    // Merge with nothing to write into the sidecar: no growth and no pixels.
+    // (Reached when an `atlas` block merely restates the shipped dimensions.)
+    // Deliberately merge-only — see the `atlas_work` comment in
+    // `patch_font_member`.
+    if matches!(group.mode, FontPatchMode::Merge { .. }) && atlas_h == cur_h && !any_alpha {
         return Ok(());
     }
 
@@ -198,26 +212,39 @@ fn patch_atlas(
         validate_glyph_patch(patch, cpk_path, spc_member, atlas_w, atlas_h)?;
     }
 
-    // Decode the existing atlas to a full-resolution alpha8 coverage buffer.
-    // We never re-encode BC4 (it would band the anti-aliased edges); instead
-    // we rebuild the whole atlas and re-emit it uncompressed below.
-    let mut pixels = decode_atlas_to_alpha8(
-        &spc.entries[sidecar_idx].data,
-        cur_w,
-        cur_h,
-        fmt,
-        cpk_path,
-        spc_member,
-    )?;
-
-    // Grow: lift the decoded rows into a taller buffer (width is fixed, so
-    // rows map 1:1), zero-filling the appended rows (transparent).
-    if grew {
-        let mut grown = vec![0u8; usize::from(atlas_w) * usize::from(atlas_h)];
-        grown[..pixels.len()].copy_from_slice(&pixels);
-        pixels = grown;
-        report.font_atlas_grows += 1;
-    }
+    // Build the starting coverage buffer at the target extent. We never
+    // re-encode BC4 (it would band the anti-aliased edges); the whole atlas is
+    // rebuilt here and re-emitted uncompressed below.
+    let mut pixels = match group.mode {
+        // Replace: start from all-zero (transparent). The shipped sidecar is
+        // never decoded, so `AtlasUnsupportedFormat` can't fire on this path —
+        // a font whose `$TXR.format` we can't read can still be rebuilt.
+        FontPatchMode::Replace { .. } => {
+            report.font_atlas_replaces += 1;
+            vec![0u8; usize::from(atlas_w) * usize::from(atlas_h)]
+        }
+        // Merge: decode the shipped atlas, then lift it into the (possibly
+        // taller) extent. Width is fixed, so rows map 1:1 and the appended
+        // rows start zeroed.
+        FontPatchMode::Merge { .. } => {
+            let decoded = decode_atlas_to_alpha8(
+                &spc.entries[sidecar_idx].data,
+                cur_w,
+                cur_h,
+                fmt,
+                cpk_path,
+                spc_member,
+            )?;
+            if atlas_h > cur_h {
+                let mut grown = vec![0u8; usize::from(atlas_w) * usize::from(atlas_h)];
+                grown[..decoded.len()].copy_from_slice(&decoded);
+                report.font_atlas_grows += 1;
+                grown
+            } else {
+                decoded
+            }
+        }
+    };
 
     // Blit each glyph's coverage in — a plain overwrite at full 8-bit precision.
     for patch in &group.glyphs {
@@ -267,6 +294,92 @@ fn patch_atlas(
     Ok(())
 }
 
+/// Resolve the atlas extent the group is asking for, validating the request
+/// against the shipped geometry.
+///
+/// Both modes lock width to the shipped `$TXR.display_width`: `patch_atlas`
+/// leaves `$TXR.scanline` at the shipped BC4 block-row pitch `width*2` (the
+/// engine reads it as the upload row stride), so only a width-preserving
+/// rewrite keeps it valid. They differ on height — merge may only grow (rows
+/// that surviving glyphs reference must not be dropped), replace may pick any
+/// nonzero height because nothing of the shipped atlas survives.
+///
+/// Runs before any allocation, so the ARGB size check here also bounds the
+/// buffers `patch_atlas` is about to build from a producer-supplied `u16`.
+fn target_extent(
+    mode: FontPatchMode,
+    cur_w: u16,
+    cur_h: u16,
+    cpk_path: &str,
+    spc_member: &str,
+) -> Result<(u16, u16), TranslateError> {
+    let (atlas_w, atlas_h) = match mode {
+        FontPatchMode::Merge { atlas: None } => (cur_w, cur_h),
+        FontPatchMode::Merge {
+            atlas: Some(requested),
+        } => {
+            check_atlas_width(requested.width, cur_w, cpk_path, spc_member)?;
+            if requested.height < cur_h {
+                return Err(TranslateError::AtlasShrink {
+                    cpk_path: cpk_path.to_string(),
+                    spc_member: spc_member.to_string(),
+                    requested: requested.height,
+                    current: cur_h,
+                });
+            }
+            (cur_w, requested.height)
+        }
+        FontPatchMode::Replace { atlas } => {
+            check_atlas_width(atlas.width, cur_w, cpk_path, spc_member)?;
+            // Replace may shrink, but not to nothing: a zero-height atlas
+            // would serialize as an empty sidecar and silently destroy the
+            // font rather than rebuilding it.
+            if atlas.height == 0 {
+                return Err(TranslateError::AtlasGeometry {
+                    cpk_path: cpk_path.to_string(),
+                    spc_member: spc_member.to_string(),
+                    detail: "replace mode requires a nonzero atlas height".into(),
+                });
+            }
+            (cur_w, atlas.height)
+        }
+    };
+
+    // The re-emitted ARGB8888 blob is 4 bytes per pixel and its size has to
+    // fit the `$RSI` `ResourceInfo` u32 slot. Checking here — before
+    // `patch_atlas` allocates — keeps a producer-supplied height from driving
+    // a ~1 GB allocation that we would only reject afterwards.
+    let argb_len = usize::from(atlas_w) * usize::from(atlas_h) * ARGB_BYTES_PER_PIXEL;
+    if u32::try_from(argb_len).is_err() {
+        return Err(TranslateError::AtlasGeometry {
+            cpk_path: cpk_path.to_string(),
+            spc_member: spc_member.to_string(),
+            detail: format!("atlas {atlas_w}×{atlas_h} needs {argb_len} bytes, which exceeds u32"),
+        });
+    }
+
+    Ok((atlas_w, atlas_h))
+}
+
+/// Atlas width is locked to the shipped width in both patch modes — see
+/// [`target_extent`].
+fn check_atlas_width(
+    requested: u16,
+    current: u16,
+    cpk_path: &str,
+    spc_member: &str,
+) -> Result<(), TranslateError> {
+    if requested != current {
+        return Err(TranslateError::AtlasWidthChange {
+            cpk_path: cpk_path.to_string(),
+            spc_member: spc_member.to_string(),
+            requested,
+            current,
+        });
+    }
+    Ok(())
+}
+
 /// BC4 byte count for a `width × height` atlas: `scanline × ceil(height /
 /// 4)`, where `scanline = (width / 4) × 8` bytes per 4-px block-row.
 fn bc4_byte_count(width: u16, height: u16) -> usize {
@@ -279,6 +392,9 @@ fn bc4_byte_count(width: u16, height: u16) -> usize {
 /// the `$TXR` format. BC4 (the shipped format) and ARGB8888 (a previously
 /// patched atlas — keeps re-apply idempotent) are supported; anything else is
 /// rejected. The sidecar length is validated against the format + geometry.
+///
+/// Only reached in [`FontPatchMode::Merge`] — a replace discards the shipped
+/// pixels, so it has nothing to decode.
 fn decode_atlas_to_alpha8(
     sidecar: &[u8],
     width: u16,
@@ -558,6 +674,7 @@ fn apply_glyph_metadata(spft: &mut SpFt, patches: &[FontGlyphPatch], report: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::AtlasSpec;
     use drv3_spc::{COMPRESSION_STORED, SpcEntry};
     use drv3_spft::{Glyph, SpFt};
     use drv3_srd::texture::{decode_argb8888_mono, encode_argb8888_mono};
@@ -662,22 +779,45 @@ mod tests {
         }
     }
 
+    fn atlas(width: u16, height: u16) -> AtlasSpec {
+        AtlasSpec { width, height }
+    }
+
+    /// A merge-mode group with no `font_name` override — what almost every
+    /// test here wants.
+    fn merge_group(atlas: Option<AtlasSpec>, glyphs: Vec<FontGlyphPatch>) -> FontFileGroup {
+        FontFileGroup {
+            mode: FontPatchMode::Merge { atlas },
+            font_name: None,
+            glyphs,
+        }
+    }
+
+    /// A replace-mode group. The atlas is mandatory here, not `Option`:
+    /// replace rebuilds from nothing and has no shipped extent to inherit.
+    fn replace_group(atlas: AtlasSpec, glyphs: Vec<FontGlyphPatch>) -> FontFileGroup {
+        FontFileGroup {
+            mode: FontPatchMode::Replace { atlas },
+            font_name: None,
+            glyphs,
+        }
+    }
+
     #[test]
     fn metadata_only_patch_changes_existing_glyph_and_reports_change() {
         let srd_bytes = build_srd_with_spft(build_spft_bytes());
         let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
-        let group = FontFileGroup {
-            font_name: None,
-            atlas: None,
-            glyphs: vec![FontGlyphPatch {
+        let group = merge_group(
+            None,
+            vec![FontGlyphPatch {
                 codepoint: 65,
                 glyph_alpha8: None,
                 position: Some((10, 5)),
                 size: None,
                 kerning: Some((-2, 1, 3)),
             }],
-        };
+        );
         let mut report = PatchReport::default();
         patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
         assert_eq!(report.font_glyphs_changed, 1);
@@ -709,17 +849,16 @@ mod tests {
         let mut spc = make_spc_with_font(srd_bytes, srdv);
 
         // Blit a 4×4 solid-255 glyph at (12, 4) — codepoint 0xE4 (ä).
-        let group = FontFileGroup {
-            font_name: None,
-            atlas: None,
-            glyphs: vec![FontGlyphPatch {
+        let group = merge_group(
+            None,
+            vec![FontGlyphPatch {
                 codepoint: 0xE4,
                 glyph_alpha8: Some(vec![255u8; 16]),
                 position: Some((12, 4)),
                 size: Some((4, 4)),
                 kerning: Some((0, 0, 0)),
             }],
-        };
+        );
         let mut report = PatchReport::default();
         patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
         assert_eq!(report.font_glyphs_added, 1);
@@ -751,17 +890,16 @@ mod tests {
         let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
 
-        let group = FontFileGroup {
-            font_name: None,
-            atlas: None,
-            glyphs: vec![FontGlyphPatch {
+        let group = merge_group(
+            None,
+            vec![FontGlyphPatch {
                 codepoint: 0xE4,
                 glyph_alpha8: Some(vec![255u8; 16]),
                 position: Some((30, 14)), // 30+4 > 32
                 size: Some((4, 4)),
                 kerning: None,
             }],
-        };
+        );
         let mut report = PatchReport::default();
         let err =
             patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap_err();
@@ -774,17 +912,16 @@ mod tests {
         let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
 
-        let group = FontFileGroup {
-            font_name: None,
-            atlas: None,
-            glyphs: vec![FontGlyphPatch {
+        let group = merge_group(
+            None,
+            vec![FontGlyphPatch {
                 codepoint: 0xE4,
                 glyph_alpha8: Some(vec![255u8; 10]), // says 4×4 = 16 but provides 10
                 position: Some((0, 0)),
                 size: Some((4, 4)),
                 kerning: None,
             }],
-        };
+        );
         let mut report = PatchReport::default();
         let err =
             patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap_err();
@@ -805,17 +942,16 @@ mod tests {
                 data: srd_bytes,
             }],
         };
-        let group = FontFileGroup {
-            font_name: None,
-            atlas: None,
-            glyphs: vec![FontGlyphPatch {
+        let group = merge_group(
+            None,
+            vec![FontGlyphPatch {
                 codepoint: 0xE4,
                 glyph_alpha8: Some(vec![255u8; 16]),
                 position: Some((0, 0)),
                 size: Some((4, 4)),
                 kerning: None,
             }],
-        };
+        );
         let mut report = PatchReport::default();
         let err =
             patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap_err();
@@ -832,9 +968,7 @@ mod tests {
         assert_eq!(sidecar_name_for("Font.SRD"), "Font.srdv");
     }
 
-    // ---- Atlas-growth tests ----
-
-    use crate::model::AtlasSpec;
+    // ---- Atlas-growth and atlas-replace tests ----
 
     /// `.srdv` `ResourceInfo` flag marking the blob as living in the `.srdv`
     /// sidecar (mirrors `ResourceLocationFlags::SRDV`).
@@ -915,20 +1049,16 @@ mod tests {
         let mut spc = make_spc_with_font(srd_bytes, srdv);
 
         // New glyph in a row only the grown atlas has (y = 20).
-        let group = FontFileGroup {
-            font_name: None,
-            atlas: Some(AtlasSpec {
-                width: 32,
-                height: 32,
-            }),
-            glyphs: vec![FontGlyphPatch {
+        let group = merge_group(
+            Some(atlas(32, 32)),
+            vec![FontGlyphPatch {
                 codepoint: 0xC4,
                 glyph_alpha8: Some(vec![255u8; 16]),
                 position: Some((12, 20)),
                 size: Some((4, 4)),
                 kerning: Some((0, 0, 0)),
             }],
-        };
+        );
         let mut report = PatchReport::default();
         patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
 
@@ -972,14 +1102,7 @@ mod tests {
         let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
         // Atlas restates current dims, no pixel glyphs → no growth, no writes.
-        let group = FontFileGroup {
-            font_name: None,
-            atlas: Some(AtlasSpec {
-                width: 32,
-                height: 16,
-            }),
-            glyphs: vec![],
-        };
+        let group = merge_group(Some(atlas(32, 16)), vec![]);
         let mut report = PatchReport::default();
         patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
         assert_eq!(report.font_atlas_grows, 0);
@@ -992,14 +1115,7 @@ mod tests {
         let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
         let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
-        let group = FontFileGroup {
-            font_name: None,
-            atlas: Some(AtlasSpec {
-                width: 64,
-                height: 32,
-            }),
-            glyphs: vec![],
-        };
+        let group = merge_group(Some(atlas(64, 32)), vec![]);
         let mut report = PatchReport::default();
         let err =
             patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap_err();
@@ -1012,14 +1128,7 @@ mod tests {
         let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
         let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
-        let group = FontFileGroup {
-            font_name: None,
-            atlas: Some(AtlasSpec {
-                width: 32,
-                height: 8,
-            }),
-            glyphs: vec![],
-        };
+        let group = merge_group(Some(atlas(32, 8)), vec![]);
         let mut report = PatchReport::default();
         let err =
             patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap_err();
@@ -1033,14 +1142,7 @@ mod tests {
         let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x11);
         let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
-        let group = FontFileGroup {
-            font_name: None,
-            atlas: Some(AtlasSpec {
-                width: 32,
-                height: 32,
-            }),
-            glyphs: vec![],
-        };
+        let group = merge_group(Some(atlas(32, 32)), vec![]);
         let mut report = PatchReport::default();
         let err =
             patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap_err();
@@ -1057,17 +1159,16 @@ mod tests {
         let mut spc = make_spc_with_font(srd_bytes, srdv);
 
         let gradient: Vec<u8> = (0..16).map(|i| (i * 17) as u8).collect();
-        let group = FontFileGroup {
-            font_name: None,
-            atlas: None,
-            glyphs: vec![FontGlyphPatch {
+        let group = merge_group(
+            None,
+            vec![FontGlyphPatch {
                 codepoint: 0xF6,
                 glyph_alpha8: Some(gradient.clone()),
                 position: Some((0, 0)),
                 size: Some((4, 4)),
                 kerning: Some((0, 0, 0)),
             }],
-        };
+        );
         let mut report = PatchReport::default();
         patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
 
@@ -1091,14 +1192,7 @@ mod tests {
         let srd_bytes = build_srd_with_spft(build_spft_bytes());
         let srdv = uniform_bc4(0, 32, 16);
         let mut spc = make_spc_with_font(srd_bytes, srdv);
-        let group = FontFileGroup {
-            font_name: None,
-            atlas: Some(AtlasSpec {
-                width: 32,
-                height: 32,
-            }),
-            glyphs: vec![],
-        };
+        let group = merge_group(Some(atlas(32, 32)), vec![]);
         let mut report = PatchReport::default();
         let err =
             patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap_err();
@@ -1106,5 +1200,214 @@ mod tests {
             err,
             TranslateError::AtlasSrdvResourceInfoMissing { .. }
         ));
+    }
+
+    // ---- Replace-mode tests ----
+
+    /// A 4×4 fully-opaque glyph at `pos` — the standard replace-mode payload
+    /// for these tests.
+    fn solid_glyph(codepoint: u32, pos: (u16, u16)) -> FontGlyphPatch {
+        FontGlyphPatch {
+            codepoint,
+            glyph_alpha8: Some(vec![255u8; 16]),
+            position: Some(pos),
+            size: Some((4, 4)),
+            kerning: Some((0, 0, 0)),
+        }
+    }
+
+    #[test]
+    fn replace_drops_shipped_glyphs() {
+        let old_len = bc4_byte_count(32, 16) as u32;
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
+        let mut spc = make_spc_with_font(srd_bytes, uniform_bc4(0, 32, 16));
+
+        // The fixture ships codepoints 32 and 65; replace lists only 0xC4, so
+        // a surviving shipped glyph would be visible in the table.
+        let group = replace_group(atlas(32, 16), vec![solid_glyph(0xC4, (12, 4))]);
+        let mut report = PatchReport::default();
+        patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
+
+        assert_eq!(report.font_glyphs_removed, 2);
+        assert_eq!(report.font_glyphs_added, 1);
+        assert_eq!(report.font_glyphs_changed, 0);
+
+        let (_, rsi) = parse_txr_and_rsi(&spc.entries[0].data);
+        let spft = SpFt::parse(&rsi.resource_data).unwrap();
+        assert_eq!(spft.glyphs.len(), 1);
+        assert_eq!(spft.glyphs[0].codepoint, 0xC4);
+    }
+
+    #[test]
+    fn replace_zeroes_shipped_atlas_ink() {
+        let old_len = bc4_byte_count(32, 16) as u32;
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
+        // Shipped atlas is uniformly inked, so any surviving pixel is obvious.
+        let mut spc = make_spc_with_font(srd_bytes, uniform_bc4(7, 32, 16));
+
+        // Height matches the shipped extent on purpose: this is the case the
+        // merge-only early return would have swallowed.
+        let group = replace_group(atlas(32, 16), vec![solid_glyph(0xC4, (0, 0))]);
+        let mut report = PatchReport::default();
+        patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
+
+        assert_eq!(report.font_atlas_replaces, 1);
+        assert_eq!(report.font_atlas_grows, 0);
+
+        let decoded = decode_argb8888_mono(&spc.entries[1].data, 32, 16);
+        assert_eq!(decoded[0], 255, "replacement glyph missing");
+        assert_eq!(
+            decoded[15 * 32 + 31],
+            0,
+            "shipped ink survived a replace at the far corner"
+        );
+    }
+
+    #[test]
+    fn replace_without_glyph_pixels_still_zeroes_atlas() {
+        let old_len = bc4_byte_count(32, 16) as u32;
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
+        let mut spc = make_spc_with_font(srd_bytes, uniform_bc4(7, 32, 16));
+
+        // Metadata-only glyph at the shipped height: no pixels and no growth,
+        // which is exactly the shape the merge-mode early return short-circuits.
+        // A replace must still rewrite the sidecar, or shipped ink would sit
+        // under a replaced glyph table with no error to show for it.
+        let group = replace_group(
+            atlas(32, 16),
+            vec![FontGlyphPatch {
+                codepoint: 0xC4,
+                glyph_alpha8: None,
+                position: Some((0, 0)),
+                size: Some((4, 4)),
+                kerning: Some((0, 0, 0)),
+            }],
+        );
+        let mut report = PatchReport::default();
+        patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
+
+        assert_eq!(report.font_atlas_replaces, 1);
+        assert_eq!(report.font_atlas_writes, 0);
+        let decoded = decode_argb8888_mono(&spc.entries[1].data, 32, 16);
+        assert!(
+            decoded.iter().all(|&p| p == 0),
+            "shipped ink survived a pixel-less replace"
+        );
+    }
+
+    #[test]
+    fn replace_permits_atlas_shrink() {
+        let old_len = bc4_byte_count(32, 16) as u32;
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
+        let mut spc = make_spc_with_font(srd_bytes, uniform_bc4(7, 32, 16));
+
+        let group = replace_group(atlas(32, 8), vec![solid_glyph(0xC4, (0, 0))]);
+        let mut report = PatchReport::default();
+        patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
+
+        assert_eq!(spc.entries[1].data.len(), 32 * 8 * 4);
+        let (txr, rsi) = parse_txr_and_rsi(&spc.entries[0].data);
+        assert_eq!(txr.display_height, 8);
+        assert_eq!(txr.display_width, 32);
+        assert_eq!(txr.format, 0x01);
+        // Width-derived, so shrinking the height leaves the pitch valid.
+        assert_eq!(txr.scanline, (32 / 4) * 8);
+        assert_eq!(rsi.resource_info_list[0][1], 32 * 8 * 4);
+        assert_eq!(report.font_atlas_replaces, 1);
+        assert_eq!(report.font_atlas_grows, 0);
+    }
+
+    #[test]
+    fn replace_rejects_width_change() {
+        let old_len = bc4_byte_count(32, 16) as u32;
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
+        let mut spc = make_spc_with_font(srd_bytes, uniform_bc4(0, 32, 16));
+
+        let group = replace_group(atlas(64, 16), vec![solid_glyph(0xC4, (0, 0))]);
+        let mut report = PatchReport::default();
+        let err =
+            patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap_err();
+        assert!(matches!(err, TranslateError::AtlasWidthChange { .. }));
+    }
+
+    #[test]
+    fn replace_rejects_zero_atlas_height() {
+        let old_len = bc4_byte_count(32, 16) as u32;
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
+        let mut spc = make_spc_with_font(srd_bytes, uniform_bc4(0, 32, 16));
+
+        let group = replace_group(atlas(32, 0), vec![solid_glyph(0xC4, (0, 0))]);
+        let mut report = PatchReport::default();
+        let err =
+            patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap_err();
+        assert!(matches!(err, TranslateError::AtlasGeometry { .. }));
+    }
+
+    #[test]
+    fn replace_succeeds_against_unsupported_shipped_format() {
+        // Format 0x11 is one `decode_atlas_to_alpha8` rejects — but replace
+        // never decodes, so a font we can't read can still be rebuilt.
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, 256, 0x11);
+        let mut spc = make_spc_with_font(srd_bytes, vec![0u8; 256]);
+
+        let group = replace_group(atlas(32, 16), vec![solid_glyph(0xC4, (0, 0))]);
+        let mut report = PatchReport::default();
+        patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
+
+        let (txr, _) = parse_txr_and_rsi(&spc.entries[0].data);
+        assert_eq!(txr.format, 0x01);
+        let decoded = decode_argb8888_mono(&spc.entries[1].data, 32, 16);
+        assert_eq!(decoded[0], 255);
+    }
+
+    #[test]
+    fn replace_preserves_spft_header_and_font_name() {
+        let old_len = bc4_byte_count(32, 16) as u32;
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
+        let mut spc = make_spc_with_font(srd_bytes, uniform_bc4(0, 32, 16));
+
+        // Names none of the header fields — they're container/engine state, not
+        // content, so a replace must leave them alone.
+        let group = replace_group(atlas(32, 16), vec![solid_glyph(0xC4, (0, 0))]);
+        let mut report = PatchReport::default();
+        patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
+
+        let (_, rsi) = parse_txr_and_rsi(&spc.entries[0].data);
+        let spft = SpFt::parse(&rsi.resource_data).unwrap();
+        assert_eq!(spft.unknown6, 6);
+        assert_eq!(spft.bit_flag_count, 0xFF5F);
+        assert_eq!(spft.scale_flag, 20);
+        assert_eq!(spft.font_name, "Test");
+    }
+
+    #[test]
+    fn replace_taller_atlas_counts_as_replace_not_grow() {
+        let old_len = bc4_byte_count(32, 16) as u32;
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
+        let mut spc = make_spc_with_font(srd_bytes, uniform_bc4(0, 32, 16));
+
+        let group = replace_group(atlas(32, 32), vec![solid_glyph(0xC4, (0, 20))]);
+        let mut report = PatchReport::default();
+        patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap();
+
+        // Taller than shipped, but rebuilt rather than grown.
+        assert_eq!(report.font_atlas_grows, 0);
+        assert_eq!(report.font_atlas_replaces, 1);
+        assert_eq!(spc.entries[1].data.len(), 32 * 32 * 4);
+    }
+
+    #[test]
+    fn replace_glyph_outside_shrunk_atlas_is_caught() {
+        let old_len = bc4_byte_count(32, 16) as u32;
+        let srd_bytes = build_srd_with_srdv_info(build_spft_bytes(), 32, 16, old_len, 0x16);
+        let mut spc = make_spc_with_font(srd_bytes, uniform_bc4(0, 32, 16));
+
+        // y=6 + height 4 fits the shipped 16-row atlas but not the declared
+        // 8-row one, so this only fails if validation uses the *new* extent.
+        let group = replace_group(atlas(32, 8), vec![solid_glyph(0xC4, (0, 6))]);
+        let mut report = PatchReport::default();
+        let err =
+            patch_font_member(&mut spc, 0, "x.spc", "font.stx", &group, &mut report).unwrap_err();
+        assert!(matches!(err, TranslateError::AtlasOverflow { .. }));
     }
 }

@@ -345,8 +345,10 @@ Each entry:
 
 ### Font file group
 
-Edits glyph metadata (position, size, kerning) and optionally writes
-new pixel data into a font's BC4 atlas.
+Either edits a shipped font in place — glyph metadata (position, size,
+kerning) plus optional new pixel data — or recreates one from scratch.
+Which of the two happens is set per group by the required `mode` field
+(see [Patch modes](#patch-modes)).
 
 ```json
 {
@@ -354,8 +356,9 @@ new pixel data into a font's BC4 atlas.
   "cpk": "partition_resident_win.cpk",
   "cpk_path": "font/v3_font00.spc",
   "spc_member": "v3_font00.stx",
+  "mode": "merge",
   "font_name": "FOT-NewRodin Pro DB",
-  "atlas": { "width": 4096, "height": 101, "format": "BC4" },
+  "atlas": { "width": 4096, "height": 101 },
   "glyphs": [
     {
       "codepoint": 228,
@@ -375,19 +378,60 @@ new pixel data into a font's BC4 atlas.
 | `cpk` | `string` | yes | Same as STX groups. |
 | `cpk_path` | `string` | yes | Same as STX groups. The `.srdv` atlas sidecar is looked up by name next to the `spc_member`. |
 | `spc_member` | `string` | yes | The `.stx`-extensioned SPC member that wraps the SRD container holding the SPFT block. |
-| `font_name` | `string` | no | Replacement value for `SpFt.font_name`. Existing name preserved when omitted. |
-| `atlas` | object | no | Target atlas geometry. When taller than the game's shipped atlas, the engine grows it (see [Atlas growth](#atlas-growth)). Omit to keep the shipped geometry. |
-| `glyphs` | array | yes | One entry per glyph edit or addition. |
+| `mode` | `"merge"` \| `"replace"` | yes | How this group relates to the shipped font — see [Patch modes](#patch-modes). No default: the two modes differ in what they destroy. |
+| `font_name` | `string` | no | Replacement value for `SpFt.font_name`. Existing name preserved when omitted — including under `replace`. |
+| `atlas` | object | conditional | Target atlas geometry. Optional under `merge` (omit to keep the shipped geometry); **required** under `replace`, which has no shipped extent to inherit. |
+| `glyphs` | array | yes | One entry per glyph edit or addition. Must be non-empty under `replace`. |
 
 The `atlas` object:
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `width` | `u16` | yes | Must equal the game's existing `$TXR` width — only height growth is supported. A mismatch is a hard error. |
-| `height` | `u16` | yes | Target atlas height. May exceed the shipped height (grows the atlas); must not be smaller (shrinking is rejected). |
-| `format` | `string` | yes | Format of the *existing* atlas: `"BC4"` (the shipped format) or `"ARGB8888"` (a previously patched atlas). Other values are rejected at load time. Patched atlases are always re-emitted uncompressed as ARGB8888 regardless of this value. |
+| `width` | `u16` | yes | Must equal the game's existing `$TXR` width, in **both** modes. A mismatch is a hard error. The reason is `$TXR.scanline`: it is deliberately left at the shipped BC4 block-row pitch `width*2` (the engine reads it as the upload row stride), so only a width-preserving rewrite keeps it valid. |
+| `height` | `u16` | yes | Target atlas height. Under `merge` it may exceed the shipped height (grows the atlas) but must not be smaller. Under `replace` any nonzero height is accepted, **including a smaller one**. |
+
+Note that `mode` is only meaningful on font groups. Because the file-group
+enum is internally tagged, a stray `mode` key on an **stx** group is
+silently ignored rather than rejected.
+
+#### Patch modes
+
+| `mode` | Shipped glyph table | Shipped atlas pixels | `atlas` | Per-glyph fields |
+|---|---|---|---|---|
+| `"merge"` | kept; listed glyphs added or overridden in place | kept; listed glyph images blitted on top | optional | `position` / `size` / `kerning` / `image_path` all optional |
+| `"replace"` | **discarded** | **discarded** (atlas starts zeroed) | required | all four **required** |
+
+`merge` is the in-place edit: a Western translation adding umlauts to an
+otherwise intact Japanese font. Glyphs the group doesn't mention keep both
+their metadata and their pixels.
+
+`replace` is for a font whose original typeface couldn't be sourced or
+licensed and has to be re-rendered wholesale from a substitute. The SPFT
+glyph table is cleared and the atlas starts as a zeroed buffer, so the
+group's `glyphs` array *is* the entire font — anything omitted is gone.
+Three consequences worth knowing:
+
+- **Every glyph needs all four fields.** There is no shipped glyph to
+  inherit from, so a partial entry would silently land at `(0, 0)` with
+  zero size or zero advance. That includes whitespace: a space glyph needs
+  a fully transparent PNG, not an omitted `image_path`.
+- **Height may shrink.** Nothing survives, so no glyph can reference a
+  dropped row. Width is still locked (see the `atlas` table above).
+- **The shipped sidecar is never decoded.** A font whose `$TXR.format` is
+  neither BC4 nor ARGB8888 can therefore still be rebuilt — `replace` is
+  the only path that reaches such a font at all. Treat that as unverified
+  rather than supported: the "leave `$TXR.scanline` alone" rule is derived
+  from the shipped *BC4* atlases, and whether the shipped stride of some
+  other format stays valid after the switch to ARGB8888 has not been
+  tested in-game.
+
+The `SpFt` header (`unknown6`, `bit_flag_count`, `scale_flag`) and the font
+name survive both modes — they're container/engine state, not content.
 
 #### Atlas growth
+
+*(`merge` mode. Under `replace` the atlas is rebuilt rather than grown —
+see [Patch modes](#patch-modes).)*
 
 DR V3 ships each font atlas at a fixed size (`$TXR` width × height, BC4).
 A producer that re-packs a font with extra glyphs (e.g. the full Latin
@@ -413,11 +457,12 @@ the atlas before blitting:
   grown region must list it with an `image_path` so its pixels are
   re-blitted at the new position; stale pixels left at the old position
   are unreferenced and harmless.
-- **Errors.** A different width (`AtlasWidthChange`), a smaller height
-  (`AtlasShrink`), a `$TXR` whose format is neither BC4 nor ARGB8888
-  (`AtlasUnsupportedFormat`), or a font whose `$RSI` has no `.srdv`
-  `ResourceInfo` entry (`AtlasSrdvResourceInfoMissing`) all abort the run
-  before any bytes are rewritten.
+- **Errors.** A different width (`AtlasWidthChange`, both modes), a smaller
+  height (`AtlasShrink`, `merge` only), a `$TXR` whose format is neither BC4
+  nor ARGB8888 (`AtlasUnsupportedFormat`, `merge` only — `replace` doesn't
+  decode), a zero `replace` height (`AtlasGeometry`), or a font whose `$RSI`
+  has no `.srdv` `ResourceInfo` entry (`AtlasSrdvResourceInfoMissing`) all
+  abort the run before any bytes are rewritten.
 
 Each glyph:
 
@@ -425,10 +470,13 @@ Each glyph:
 |---|---|---|---|
 | `codepoint` | `u32` | yes | Unicode codepoint. Canonical key. |
 | `char` | `string` | no | Human-readable mirror of `codepoint`. When present, validated to be a single character matching `codepoint`. |
-| `image_path` | `string` | no | Path to the per-glyph bitmap image, **relative to this JSON file's directory**. Its alpha channel is decoded into single-channel alpha8 before the engine sees it. (Renamed from `png`.) |
-| `position` | `{ x: u16, y: u16 }` | conditional | Top-left atlas coordinate in pixels. Required for new codepoints and when `image_path` is present. |
-| `size` | `{ width: u8, height: u8 }` | conditional | Glyph dimensions in pixels. Must equal the image's pixel dimensions when both are present. |
-| `kerning` | `{ left: i8, right: i8, vertical: i8 }` | no | Signed pixel deltas: `left`/`right` horizontal side bearings, `vertical` offset. |
+| `image_path` | `string` | conditional | Path to the per-glyph bitmap image, **relative to this JSON file's directory**. Its alpha channel is decoded into single-channel alpha8 before the engine sees it. (Renamed from `png`.) Required under `replace`. |
+| `position` | `{ x: u16, y: u16 }` | conditional | Top-left atlas coordinate in pixels. Under `merge`, required for new codepoints and when `image_path` is present; under `replace`, always required. |
+| `size` | `{ width: u8, height: u8 }` | conditional | Glyph dimensions in pixels. Must equal the image's pixel dimensions when both are present. Always required under `replace`. |
+| `kerning` | `{ left: i8, right: i8, vertical: i8 }` | conditional | Signed pixel deltas: `left`/`right` horizontal side bearings, `vertical` offset. Optional under `merge` (inherits from the shipped glyph), required under `replace`. |
+
+Under `replace`, all of a glyph's missing required fields are reported in a
+single error rather than one per run.
 
 Unknown keys in a glyph object are rejected (so a stale `png` field is a
 hard error rather than a silently-dropped image reference).
@@ -470,13 +518,21 @@ Loaded by [`merge_docs`](../crates/drv3-dto-patch/src/lib.rs):
 - **Duplicate codepoint**: the same `codepoint` appearing more than once within a single font group is rejected.
 - **`char` vs `codepoint` disagreement**: when both are present, `char` must be a single character whose Unicode codepoint equals `codepoint`.
 - **Image dimensions vs `size`**: when both are present, the decoded image's width and height must equal `size`.
+- **`replace` without `atlas`**: a `replace`-mode font group must declare its atlas geometry — it rebuilds from nothing and has no shipped extent to inherit.
+- **`replace` with no glyphs**: a `replace`-mode group's glyph list is the complete font, so an empty one would erase the font entirely and is rejected.
+- **`replace` glyph missing geometry**: every glyph in a `replace`-mode group must carry `position`, `size`, `kerning`, and `image_path`. All missing fields are named in one error.
+
+The `replace`-mode checks run *before* any glyph image is decoded, so a
+malformed group fails immediately rather than after reading a few hundred
+PNGs.
 
 ### Glyph-image sidecar conventions
 
 - Paths in the `image_path` field are resolved relative to **the JSON file's directory** (not the CWD of `drv3-translate-cli apply`). Each JSON has its own base directory.
 - RGBA images contribute via the alpha channel — the decoder reads the alpha plane straight through.
 - The DR V3 atlas convention is "background = 0, ink opacity = 255", which matches what most font-rasterizer exports already produce.
-- Writing glyph pixels re-emits the whole atlas in the parallel `.srdv` SPC member as uncompressed **ARGB8888**: the shipped BC4 atlas is decoded to coverage, the new glyphs are copied in at full 8-bit precision, and the result is written back with the coverage replicated into all four channels. This avoids BC4's block quantization, which bands anti-aliased glyph edges. Original glyphs are preserved exactly (decoded straight from the shipped atlas); only the `$TXR` format/height and `$RSI` size change — see [Atlas growth](#atlas-growth).
+- Writing glyph pixels re-emits the whole atlas in the parallel `.srdv` SPC member as uncompressed **ARGB8888**: the coverage buffer is built at the target extent, the glyphs are copied in at full 8-bit precision, and the result is written back with the coverage replicated into all four channels. This avoids BC4's block quantization, which bands anti-aliased glyph edges. Only the `$TXR` format/height and `$RSI` size change — see [Atlas growth](#atlas-growth).
+- Under `merge`, that buffer starts as the decoded shipped atlas, so original glyphs are preserved exactly. Under `replace` it starts zeroed, so nothing of the shipped atlas survives — see [Patch modes](#patch-modes).
 
 ### Worked example: STX-only patch
 
@@ -527,6 +583,7 @@ drv3-translate-cli apply \
       "cpk": "partition_resident_win.cpk",
       "cpk_path": "font/v3_font00.spc",
       "spc_member": "v3_font00.stx",
+      "mode": "merge",
       "font_name": "FOT-NewRodin Pro DB",
       "glyphs": [
         {
@@ -546,6 +603,54 @@ drv3-translate-cli apply \
 The `image_path` is resolved relative to this JSON's location: if the JSON
 is at `work/de.json`, the engine reads
 `work/glyphs/v3_font00/U+00E4.png`.
+
+### Worked example: recreating a font
+
+When the original typeface couldn't be sourced, `mode: "replace"` swaps the
+whole font for one re-rendered from a substitute. Note that every glyph
+carries all four fields, that the space at U+0020 ships a transparent PNG
+rather than omitting `image_path`, and that `atlas` is mandatory here:
+
+```json
+{
+  "schema": "drv3-translate/v1",
+  "target_language": "de",
+  "files": [
+    {
+      "format": "font",
+      "cpk": "partition_resident_win.cpk",
+      "cpk_path": "font/v3_font00.spc",
+      "spc_member": "v3_font00.stx",
+      "mode": "replace",
+      "font_name": "Noto Sans",
+      "atlas": { "width": 4096, "height": 512 },
+      "glyphs": [
+        {
+          "codepoint": 32,
+          "char": " ",
+          "image_path": "./glyphs/v3_font00/U+0020.png",
+          "position": { "x": 0, "y": 0 },
+          "size": { "width": 8, "height": 1 },
+          "kerning": { "left": 0, "right": 12, "vertical": 0 }
+        },
+        {
+          "codepoint": 65,
+          "char": "A",
+          "image_path": "./glyphs/v3_font00/U+0041.png",
+          "position": { "x": 16, "y": 0 },
+          "size": { "width": 20, "height": 26 },
+          "kerning": { "left": 1, "right": 1, "vertical": 0 }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Everything the shipped `v3_font00` contained and this document doesn't list
+is gone after the patch — including glyphs the game's own scripts still
+reference. A recreation is only safe once its glyph set covers every
+codepoint the translated text uses.
 
 ### Report file (`--report`)
 
@@ -573,8 +678,10 @@ emits a structured outcome record:
   "extract_collisions": [],
   "font_glyphs_added": 12,
   "font_glyphs_changed": 4,
+  "font_glyphs_removed": 0,
   "font_atlas_writes": 12,
-  "font_atlas_grows": 1
+  "font_atlas_grows": 1,
+  "font_atlas_replaces": 0
 }
 ```
 
@@ -586,10 +693,12 @@ emits a structured outcome record:
 | `drift` | Per-slot drift events (`applied` is `true` for `warn`, `false` for `skip`). |
 | `missing` | Patches that pointed at a file, SPC member, or STX slot absent from the supplied game data. |
 | `extract_collisions` | In `--mode extract`, files overwritten because two input CPKs shipped the same path. Empty in `--mode repack`. |
-| `font_glyphs_added` | Glyphs whose codepoint did not previously exist in the SPFT and were added. |
-| `font_glyphs_changed` | Glyphs that already existed and had at least one metadata field (`position`, `size`, `kerning`) changed. |
-| `font_atlas_writes` | Glyphs whose pixel data was blitted into the BC4 atlas. |
-| `font_atlas_grows` | Font groups whose atlas was grown in height to fit a taller re-pack (see [Atlas growth](#atlas-growth)). |
+| `font_glyphs_added` | Glyphs whose codepoint did not previously exist in the SPFT and were added. A `replace` clears the table first, so this equals its glyph count. |
+| `font_glyphs_changed` | Glyphs that already existed and had at least one metadata field (`position`, `size`, `kerning`) changed. Always `0` for a `replace`. |
+| `font_glyphs_removed` | Glyphs dropped because their group ran in `replace` mode. `merge` never removes a glyph. |
+| `font_atlas_writes` | Glyphs whose pixel data was blitted into the atlas. |
+| `font_atlas_grows` | Font groups whose atlas was grown in height to fit a taller re-pack (see [Atlas growth](#atlas-growth)). `merge` only. |
+| `font_atlas_replaces` | Font groups whose atlas was rebuilt from a zeroed buffer by `replace`, discarding every shipped pixel — counted here even when the new atlas is taller than the shipped one. |
 
 The library-side report types are documented on `PatchReport` in
 [`crates/drv3-translate/src/report.rs`](../crates/drv3-translate/src/report.rs).

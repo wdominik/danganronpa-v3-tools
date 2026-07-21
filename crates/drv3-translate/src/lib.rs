@@ -56,8 +56,8 @@ mod report;
 pub use engine::apply;
 pub use error::TranslateError;
 pub use model::{
-    AtlasSpec, FileFormat, FontFileGroup, FontGlyphPatch, StxEntryPatch, StxFileGroup,
-    TranslationFileGroup, TranslationSet,
+    AtlasSpec, FileFormat, FontFileGroup, FontGlyphPatch, FontPatchMode, StxEntryPatch,
+    StxFileGroup, TranslationFileGroup, TranslationSet,
 };
 pub use options::{DriftPolicy, PatchOptions};
 pub use report::{DriftRecord, MissingRecord, PatchReport};

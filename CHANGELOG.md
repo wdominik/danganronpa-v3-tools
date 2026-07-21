@@ -6,6 +6,61 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-21
+
+### Added
+
+- **Font groups can now recreate a font wholesale.** The new required
+  `mode` field on a font file group selects `"merge"` (the previous
+  behavior: shipped glyph table and atlas pixels survive, listed glyphs are
+  layered on top) or `"replace"` (both are discarded, so the listed glyphs
+  are the complete font). `replace` exists for typefaces that couldn't be
+  sourced or licensed and have to be re-rendered from a substitute.
+  Because nothing of the shipped atlas survives, `replace` may also *shrink*
+  the atlas height, and it never decodes the shipped `.srdv` — so a font
+  whose `$TXR.format` is neither BC4 nor ARGB8888 can still be rebuilt
+  (untested in-engine; the `$TXR.scanline` rule is derived from the shipped
+  BC4 atlases).
+- **Two report counters**: `font_glyphs_removed` (glyphs dropped by a
+  `replace`) and `font_atlas_replaces` (atlases rebuilt from zero). A
+  `replace` counts under `font_atlas_replaces`, never `font_atlas_grows`,
+  even when its declared height exceeds the shipped one.
+
+### Changed
+
+Breaking, and taken without a compatibility shim since the schema is
+pre-release:
+
+- **`mode` is required on every font file group.** There is no default: the
+  two modes differ in what they destroy, so guessing would be unsafe. A
+  document written against 0.2.0 fails with `missing field \`mode\``.
+- **`atlas.format` was removed**, one release after being added in 0.2.0.
+  It was validated at parse time and then discarded — the engine reads the
+  true format from `$TXR.format` and already rejects anything it can't
+  decode — so it carried no information, and under `replace` (which decodes
+  nothing) it would have been actively meaningless. `AtlasJson` keeps
+  `deny_unknown_fields`, so a leftover `"format"` key is a hard error rather
+  than silently ignored.
+- **Under `replace`, every glyph must carry `position`, `size`, `kerning`,
+  and `image_path`**, and the group must declare an `atlas` and list at
+  least one glyph. There is no shipped glyph to inherit from, so a partial
+  entry would silently land at `(0, 0)` with zero size or zero advance.
+  Whitespace glyphs need a transparent PNG rather than an omitted
+  `image_path`. All of a glyph's missing fields are reported at once.
+- **`FontFileGroup.atlas` moved into the new `FontPatchMode` enum**
+  (`Merge { atlas: Option<AtlasSpec> }` / `Replace { atlas: AtlasSpec }`),
+  making "replace without a declared atlas" unrepresentable rather than a
+  runtime check. Library callers constructing `FontFileGroup` directly are
+  affected.
+- **`AtlasWidthChange` and `AtlasShrink` messages were reworded.** Width is
+  locked in both modes (not "only height growth is supported"), and the
+  shrink error now points at `mode: "replace"` as the way to get a smaller
+  atlas.
+- **Atlas byte-size validation moved ahead of allocation.** A
+  producer-supplied `u16` height could previously drive a ~1 GB allocation
+  that was only rejected afterwards when the `$RSI` size slot overflowed
+  `u32`.
+
 ## [0.2.0] — 2026-07-19
 
 ### Fixed
@@ -359,7 +414,8 @@ _Predates the public Git history — which begins at the initial commit tagged
 - **`drv3-cli roundtrip`** sanity-check subcommand: parse a file,
   re-emit it, exit non-zero if the bytes diverge.
 
-[Unreleased]: https://github.com/wdominik/danganronpa-v3-tools/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/wdominik/danganronpa-v3-tools/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.3.0
 [0.2.0]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.2.0
 [0.1.4]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.4
 [0.1.3]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.3
