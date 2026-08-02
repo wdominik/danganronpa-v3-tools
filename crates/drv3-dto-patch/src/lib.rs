@@ -96,7 +96,7 @@ pub struct FontFileGroupJson {
 
 /// How a font group relates to the font the game ships. Mirrors
 /// [`drv3_translate::FontPatchMode`], minus the atlas payload — the JSON keeps
-/// `atlas` as a sibling key and [`convert_font_group`] folds the two together.
+/// `atlas` as a sibling key and `convert_font_group` folds the two together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FontPatchModeJson {

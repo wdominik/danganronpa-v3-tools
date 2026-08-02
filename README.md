@@ -270,7 +270,7 @@ block tree.
 
 - **Rust stable**, edition 2024. The toolchain channel is declared in
   [`rust-toolchain.toml`](rust-toolchain.toml) (it tracks the current stable
-  release); the MSRV is the `rust-version` in `Cargo.toml` (currently 1.96).
+  release); the MSRV is the `rust-version` in `Cargo.toml` (currently 1.97).
 - Build everything:
 
   ```sh

@@ -6,6 +6,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-08-02
+
+### Changed
+
+- **Minimum supported Rust version is now 1.97** (raised from 1.96),
+  keeping the MSRV on the latest stable release per the workspace policy.
+- **Refreshed dependencies** via `cargo update` — routine minor/patch
+  bumps across the tree (notably `serde` 1.0.229, `serde_json` 1.0.151,
+  `thiserror` 2.0.19, `clap` 4.6.5, `memmap2` 0.9.11).
+
 ## [0.3.0] — 2026-07-21
 
 ### Added
@@ -414,7 +424,8 @@ _Predates the public Git history — which begins at the initial commit tagged
 - **`drv3-cli roundtrip`** sanity-check subcommand: parse a file,
   re-emit it, exit non-zero if the bytes diverge.
 
-[Unreleased]: https://github.com/wdominik/danganronpa-v3-tools/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/wdominik/danganronpa-v3-tools/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.3.1
 [0.3.0]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.3.0
 [0.2.0]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.2.0
 [0.1.4]: https://github.com/wdominik/danganronpa-v3-tools/releases/tag/v0.1.4

@@ -66,10 +66,11 @@ and never reference either document directly (see §8).
 
 ## 2. Toolchain & build
 
-- **Rust stable**, pinned in `rust-toolchain.toml`. The MSRV
-  (`rust-version` in the workspace `Cargo.toml`) tracks the latest stable
-  release — currently 1.96 — so the modern idioms in §12 are always
-  available; bumping it requires a workspace-wide compile check.
+- **Rust stable**, declared in `rust-toolchain.toml` (the channel tracks
+  the current stable release). The MSRV (`rust-version` in the workspace
+  `Cargo.toml`) tracks the latest stable release — currently 1.97 — so
+  the modern idioms in §12 are always available; bumping it requires a
+  workspace-wide compile check.
 - **Edition 2024** across every crate.
 - **`rustfmt` defaults** — no custom `rustfmt.toml`. Run
   `cargo fmt --all` before pushing.
