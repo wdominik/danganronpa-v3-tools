@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
@@ -51,7 +51,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
@@ -68,7 +68,7 @@ jobs:
       # `rust-version` in Cargo.toml.
       RUSTUP_TOOLCHAIN: "1.97"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install MSRV toolchain
         run: rustup toolchain install 1.97 --profile minimal
